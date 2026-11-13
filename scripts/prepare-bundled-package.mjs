@@ -400,7 +400,12 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
   rmSync(destinationDir, { recursive: true, force: true });
   mkdirSync(destinationDir, { recursive: true });
   for (const entry of sourcePackage.files ?? []) {
-    cpSync(resolve(sourceDir, entry), resolve(destinationDir, entry), { recursive: true });
+    let entrySource = resolve(sourceDir, entry);
+    // Chimera fork: upstream's release flow copies the repo-level skills/ folder into
+    // the server package; the managed git install skips that step, so fall back to it.
+    const rootSkills = resolve(sourceRoot, "skills");
+    if (entry === "skills" && !existsSync(entrySource) && existsSync(rootSkills)) entrySource = rootSkills;
+    cpSync(entrySource, resolve(destinationDir, entry), { recursive: true });
   }
   for (const entry of ["README.md", "LICENSE", "LICENSE.md"]) {
     const sourcePath = resolve(sourceDir, entry);
