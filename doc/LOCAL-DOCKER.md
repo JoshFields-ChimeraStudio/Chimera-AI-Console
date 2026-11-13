@@ -134,6 +134,8 @@ Optional hardening and tweaks, by editing `docker/docker-compose.yml`:
 | `BETTER_AUTH_SECRET must be set` | `docker/.env` missing, in the wrong folder, or saved with a BOM. Recreate it with step 3. |
 | `curl.exe` health check fails, page won't load | `docker compose ... ps` and `logs server`. The server waits for the database health check first. |
 | Sign-in loops or redirects to the wrong address | `PAPERCLIP_PUBLIC_URL` doesn't match the URL in your browser. |
+| Onboarding fails with `ACPX provider package ... resolves outside the selected provider root` | Upstream's pnpm-workspace Docker layout trips the ACPX install check. This fork patches `packages/paperclip-runner/src/drivers/acpx/installation-integrity.ts` to accept the workspace's pnpm store. If it returns, check that patch is still there. |
+| Onboarding fails with `Paperclip Runner is unavailable for this harness and environment` right after a rebuild | The server detects libc once at startup and caches it. A slow boot can make that fail. Run `docker compose -f docker/docker-compose.yml restart server`. The timeout is now 5 s, so this should be rare. |
 | Disk fills up | `docker builder prune` clears build cache; `docker image prune` removes old images. Neither touches data volumes. |
 
 ## 9. Remove everything

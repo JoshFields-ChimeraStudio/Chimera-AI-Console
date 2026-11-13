@@ -18,7 +18,7 @@ async function detectLocalRunnerTarget(): Promise<LocalRunnerTarget> {
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
       execFile("getconf", ["GNU_LIBC_VERSION"], {
-        encoding: "utf8", timeout: 1_000, killSignal: "SIGKILL", maxBuffer: 1_024,
+        encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL", maxBuffer: 1_024,
       }, (error, output) => error ? reject(error) : resolve(output));
     });
     const version = /^glibc\s+(\d+\.\d+(?:\.\d+)?)$/.exec(stdout.trim())?.[1];
