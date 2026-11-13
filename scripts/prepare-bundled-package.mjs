@@ -383,6 +383,20 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
     throw new Error(`${sourcePackage.name} does not declare bundled dependencies`);
   }
 
+  // Chimera fork: the managed git install calls this script directly instead of
+  // `pnpm pack`, so the package's `prepack` hook (which builds the UI into
+  // server/ui-dist) never runs and the copy below fails with ENOENT. Build it here.
+  const uiDistScript = resolve(sourceRoot, "scripts", "prepare-server-ui-dist.sh");
+  if ((sourcePackage.files ?? []).includes("ui-dist")
+    && !existsSync(resolve(sourceDir, "ui-dist"))
+    && existsSync(uiDistScript)) {
+    execFileSync("bash", [uiDistScript], {
+      cwd: sourceRoot,
+      stdio: "inherit",
+      env: { ...process.env, PAPERCLIP_RELEASE_REUSE_UI_DIST: "1" },
+    });
+  }
+
   rmSync(destinationDir, { recursive: true, force: true });
   mkdirSync(destinationDir, { recursive: true });
   for (const entry of sourcePackage.files ?? []) {

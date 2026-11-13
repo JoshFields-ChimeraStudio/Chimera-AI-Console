@@ -12,6 +12,7 @@ This is **Chimera-AI-Console**, Chimera Studio's fork of [Paperclip](https://git
 
 - `doc/BACKLOG.md`: planned changes to this build (ADO integration, run logging and debugging UI, agent memory). The only backlog; update it in place.
 - `doc/LOCAL-DOCKER.md`: our step-by-step guide to running a local instance in Docker on Windows.
+- `doc/DEPLOYMENT-STEPS.md`: step-by-step deploy of this fork to the Azure VM, with rollback and troubleshooting.
 - `../PAPERCLIP-PILOT.md` (parent folder, `D:\projects\AI Team`): how the pilot VM was built, agent roster, decisions, troubleshooting. Read it before touching anything on the VM.
 - `doc/DEVELOPING.md` (5k lines, use the headings: Start Dev, Test Commands, Hot-Restart Deploys, Local Instance Layout), `doc/INSTALLING.md`, `doc/DOCKER.md`, `doc/DEPLOYMENT-MODES.md`, `doc/DATABASE.md`.
 - `rules/*.mdc`: scoped rules that `AGENTS.md` requires you to read before editing matching files.
@@ -57,39 +58,20 @@ Follow `doc/LOCAL-DOCKER.md`. The line-ending fix in step 2 of that guide is req
 
 ## Deploy to the Azure VM
 
-Current VM (details in `../PAPERCLIP-PILOT.md`): `vm-paperclip-westus-001`, subscription `sb_sbxquetz_joshf`, reached only over the studio VPN (SSH from the VPN range, HTTPS via Caddy on 443 in front of Paperclip on loopback 3100). Paperclip runs as a **systemd user service** (`paperclipai service ...`) under the `paperclip` user, instance data in `~/.paperclip/instances/default`.
+**Follow `doc/DEPLOYMENT-STEPS.md`.** It has the full procedure: push, read-only GitHub token, VM checks (Node, Rust, swap, outbound access), backup, `install --repo ... --ref <sha>`, verification, rollback, later updates, and troubleshooting.
 
-**Important:** the VM was set up with the *upstream npm release* (`npx paperclipai install`), not this fork. Nothing from this fork is running there yet.
+Key facts to keep in mind:
 
-The supported route for deploying the fork is the managed git-ref install (`doc/INSTALLING.md`). It resolves the ref to an exact commit, builds it on the VM, and keeps the last two payloads for rollback. Instance data is untouched.
-
-```sh
-# On the VM, as the paperclip user. If the fork repo is private, export GH_TOKEN or GITHUB_TOKEN
-# (read access to the repo) first; the installer uses it to resolve the ref.
-paperclipai service status
-paperclipai install --repo JoshFields-ChimeraStudio/Chimera-AI-Console --ref master
-paperclipai service restart
-
-# later updates (re-resolves the branch, backs up the DB, switches payload, restarts the service)
-paperclipai update
-paperclipai update --check      # exit code 10 = update available
-paperclipai update --rollback   # back to the previous payload
-paperclipai doctor
-```
-
-Notes and risks:
-
-- A branch ref follows the branch on `update`; a commit SHA or tag is pinned. For anything but testing, deploy a tag or SHA.
-- A git install runs `pnpm install --frozen-lockfile` and the full build on the VM. The build includes the Rust Runner, so the VM may need a Rust toolchain and more than the pilot VM's 2 vCPU / 8 GB. **Unverified; try it and record the result here.**
-- The first switch from the npm install to a git install has not been tried. Take a manual DB backup first (`paperclipai db:backup`; automatic backups land in `~/.paperclip/instances/default/data/backups`), and check `paperclipai --version` and `/api/health` afterwards.
-- Never `npm`-update or reinstall while agents are mid-run; use the guarded restart in `doc/DEVELOPING.md` (Hot-Restart Deploys).
-- Telemetry is opt-out and goes to Paperclip's endpoint. On the VM it is disabled in the instance `config.json` (`telemetry.enabled = false`). Re-check after any install.
-- Alternative path if the git install fails: build the Docker image (`Dockerfile`) and run it on the VM. That would replace the service-based setup, so decide deliberately.
+- VM: `vm-paperclip-westus-001`, subscription `sb_sbxquetz_joshf`, VPN-only (details in `../PAPERCLIP-PILOT.md`). Paperclip runs as a systemd user service behind Caddy (HTTPS on 443, Paperclip on loopback 3100). Instance data is in `~/.paperclip/instances/default`.
+- The VM was set up with the **upstream npm release**. The fork is deployed with the managed git-ref install, which builds from GitHub, so only **pushed** commits can be deployed. The first deploy is untested; record the result in section 11 of `doc/DEPLOYMENT-STEPS.md`.
+- Deploy a commit SHA the first time, take `paperclipai db:backup` first, and roll back with `paperclipai update --rollback` (the database is not rolled back).
+- Telemetry is disabled in the instance `config.json` (`telemetry.enabled = false`). Re-check after any install.
+- Fallback if the git install cannot work on the VM: build the Docker image (`Dockerfile`) and run it there. That replaces the service-based setup, so decide deliberately.
 
 ## Working rules for this build
 
 - **Lockfile: keep `pnpm-lock.yaml` and commit it with any dependency change** (run `pnpm install`, then commit the result). The Docker build copies it, and the VM's git install runs `pnpm install --frozen-lockfile`, which fails if it is missing or stale. Deleting it would also let every build resolve different dependency versions, which can break the pinned patches in `patches/` and the overrides in `pnpm-workspace.yaml`.
 - **Line endings must be LF in the working tree.** A CRLF Windows checkout breaks the Docker build. The fix (`git config core.autocrlf input` and re-checkout) is in `doc/LOCAL-DOCKER.md` and is already applied on Josh's machine. Don't commit line-ending-only changes.
-- **Fork patches to upstream code, keep them when editing nearby:** (1) `packages/paperclip-runner/src/drivers/acpx/installation-integrity.ts` accepts the workspace pnpm store (`<root>/../node_modules/.pnpm`) as part of the provider root, because the Docker and git-install layout is a pnpm workspace; without it onboarding a Claude agent fails with "resolves outside the selected provider root". (2) `server/src/lib/agent-runner-platform.ts` waits 5 s (was 1 s) for libc detection, so a slow boot doesn't disable the native Runner.
+- **Fork patches to upstream code, keep them when editing nearby:** (1) `packages/paperclip-runner/src/drivers/acpx/installation-integrity.ts` accepts the workspace pnpm store (`<root>/../node_modules/.pnpm`) as part of the provider root, because the Docker and git-install layout is a pnpm workspace; without it onboarding a Claude agent fails with "resolves outside the selected provider root". (2) `server/src/lib/agent-runner-platform.ts` waits 5 s (was 1 s) for libc detection, so a slow boot doesn't disable the native Runner. (3) `scripts/prepare-bundled-package.mjs` builds `server/ui-dist` when it is missing, because the managed git install calls that script directly and skips the server's `prepack` hook; without it `paperclipai install --ref` fails with `ENOENT ... server/ui-dist`.
 - Never read or stage `.env`, `docker/.env`, `config.json`, `secrets/` or `master.key`. Ask for specific values instead.
 - Agents work on `ai/<work-item-id>-<short-name>` branches and open PRs into `master`; they never commit to `master` directly.
