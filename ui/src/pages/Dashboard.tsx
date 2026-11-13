@@ -44,6 +44,9 @@ import { taskStatusIconProps } from "@/lib/task-status-presentation";
 
 const DASHBOARD_ACTIVITY_LIMIT = 10;
 
+// Change this string, rebuild, and reload to confirm a new local or VM build is the one you are looking at.
+const CHIMERA_BUILD_MARKER = "local-test-1";
+
 function getRecentIssues(issues: Issue[]): Issue[] {
   return [...issues]
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
@@ -344,6 +347,10 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
+      <InlineBanner tone="info" title="Chimera AI Console">
+        Custom Chimera Studio build. Build marker: {CHIMERA_BUILD_MARKER}
+      </InlineBanner>
+
       {pausedBanner?.kind === "imported" ? (
         <InlineBanner
           tone="warning"

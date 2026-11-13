@@ -348,12 +348,26 @@ export function createAcpxPackageJsonResolver(
       "ACPX provider node_modules resolves outside the selected provider root",
     );
   }
+  // Chimera fork: a pnpm workspace install (the Docker image, git-ref installs)
+  // symlinks provider packages from <root>/node_modules into the workspace's
+  // virtual store at <root>/../node_modules/.pnpm. Treat that store as part of
+  // the selected root. Upstream's flat npm layout never needs this.
+  const workspacePnpmStore = (() => {
+    try {
+      const store = realpathSync(resolve(canonicalRoot, "..", "node_modules", ".pnpm"));
+      return pathIsInside(resolve(canonicalRoot, ".."), store) ? store : null;
+    } catch {
+      return null;
+    }
+  })();
+  const inPnpmStore = (candidate: string) =>
+    workspacePnpmStore !== null && pathIsInside(workspacePnpmStore, candidate);
   const resolver: AcpxPackageJsonResolver = (packageName, issuerPackageJsonPath) => {
     const canonicalIssuer =
       issuerPackageJsonPath === undefined
         ? canonicalManifest
         : realpathSync(issuerPackageJsonPath);
-    if (!pathIsInside(canonicalRoot, canonicalIssuer)) {
+    if (!pathIsInside(canonicalRoot, canonicalIssuer) && !inPnpmStore(canonicalIssuer)) {
       throw new Error(
         `ACPX provider package issuer for ${packageName} resolves outside the selected provider root`,
       );
@@ -362,6 +376,7 @@ export function createAcpxPackageJsonResolver(
       resolvePackageJsonFromIssuer(packageName, canonicalIssuer),
     );
     if (!pathIsInside(canonicalNodeModules, packageJsonPath)
+      && !inPnpmStore(packageJsonPath)
       && !isDeclaredHoistedProviderPlatform(canonicalRoot, canonicalManifest, canonicalIssuer, packageName, packageJsonPath)) {
       throw new Error(
         `ACPX provider package ${packageName} resolves outside the selected provider root`,
