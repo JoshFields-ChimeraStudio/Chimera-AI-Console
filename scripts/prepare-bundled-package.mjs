@@ -9,6 +9,30 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const nativeTargets = ["linux-x64", "darwin-arm64", "darwin-x64"];
 
+// Chimera fork: pnpm resolves `workspace:*` to each dependency's own version
+// (plugin-sdk is 1.0.0 while most packages are 0.3.1), but the stock rewrite
+// used the depending package's version, producing unsatisfiable ranges.
+let workspaceVersionCache = null;
+function workspaceVersions() {
+  if (workspaceVersionCache) return workspaceVersionCache;
+  const versions = new Map();
+  const dirs = ["server", "ui", "cli"].map(d => resolve(repoRoot, d));
+  for (const group of ["packages", "packages/adapters", "packages/plugins"]) {
+    const groupDir = resolve(repoRoot, group);
+    if (!existsSync(groupDir)) continue;
+    for (const entry of readdirSync(groupDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) dirs.push(resolve(groupDir, entry.name));
+    }
+  }
+  for (const dir of dirs) {
+    try {
+      const manifest = JSON.parse(readFileSync(resolve(dir, "package.json"), "utf8"));
+      if (manifest.name && manifest.version) versions.set(manifest.name, manifest.version);
+    } catch {}
+  }
+  return (workspaceVersionCache = versions);
+}
+
 export function materializePublishManifest(pkg) {
   const publishConfig = pkg.publishConfig ?? {};
   const publishManifest = { ...pkg };
@@ -24,7 +48,7 @@ export function materializePublishManifest(pkg) {
         if (typeof specifier !== "string" || !specifier.startsWith("workspace:")) return [name, specifier];
         const range = specifier.slice("workspace:".length);
         const prefix = range === "^" || range === "~" ? range : "";
-        return [name, `${prefix}${pkg.version}`];
+        return [name, `${prefix}${workspaceVersions().get(name) ?? pkg.version}`];
       }),
     );
   }
