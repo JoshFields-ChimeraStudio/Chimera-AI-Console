@@ -414,6 +414,13 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
   const publishManifest = materializePublishManifest(sourcePackage);
+  // Chimera fork: the staged copy is packed outside the pnpm workspace, so the
+  // source package's pack-time hooks (prepack builds the UI and server, postpack
+  // cleans up) cannot run there and would fail `npm pack`. Both are already done.
+  if (publishManifest.scripts) {
+    const { prepack, postpack, prepare, prepublishOnly, ...keptScripts } = publishManifest.scripts;
+    publishManifest.scripts = keptScripts;
+  }
   const rootPackage = JSON.parse(readFileSync(resolve(sourceRoot, "package.json"), "utf8"));
   const profileData = bundledDependencies.includes("@agentclientprotocol/codex-acp")
     ? JSON.parse(readFileSync(resolve(sourceRoot, "packages/paperclip-runner/acpx-profiles.json"), "utf8")) : undefined;
