@@ -131,6 +131,7 @@ chmod 600 ~/config.json.pre-fork
 **5.2 Set the token for this session only and install.** Use the `paperclipai` already on the VM, and put the whole command on **one line**. Replace `<sha>` with the commit from step 2.3.
 
 ```bash
+umask 022                              # Ubuntu's default 002 makes installed files group-writable, which the Copilot check rejects
 read -rs GH_TOKEN && export GH_TOKEN      # paste the token, press Enter (nothing is echoed)
 paperclipai install --yes --repo JoshFields-ChimeraStudio/Chimera-AI-Console --ref <sha>; echo "exit: $?"
 unset GH_TOKEN
@@ -208,6 +209,7 @@ Each update needs `GH_TOKEN` set in that session (same as step 5.2) while the re
 | Install stops with `ENOENT ... server/ui-dist` or `server/skills` in `prepare-bundled-package.mjs` | Upstream's git install skips the server's `prepack` step (builds `server/ui-dist`) and its release step that copies the repo's `skills/` into the server package. This fork's `scripts/prepare-bundled-package.mjs` does both when missing. Deploy a commit that includes that change. |
 | `npm pack ... prepack` fails with `Cannot resolve package from workspace` or `prepare-server-ui-dist.sh: No such file` | The staged server copy still had the source `prepack` hook. This fork's `scripts/prepare-bundled-package.mjs` removes `prepack`/`postpack` from the staged manifest. Deploy a commit that includes that change. |
 | `npm install ... ETARGET No matching version found for @paperclipai/plugin-sdk@0.3.1` | Staged manifests pinned every `workspace:*` dependency to the depending package's version. This fork's `prepare-bundled-package.mjs` now uses each dependency's own version. Deploy a commit that includes that change. |
+| `Copilot executable has unsafe permissions` during `npm install` (postinstall) | The shell umask is 002, so npm extracted the binary group-writable. Run `umask 022` in the same shell, delete the `.tmp-*` folders, and rerun the install. |
 | `npx paperclipai@latest install ...` exits 1 with no output | `npx` fails silently on this VM. Use `paperclipai install ...` (step 5.2). |
 | `--repo requires --ref` | Always pass both. |
 | 404 or "Not Found" resolving the ref | Token missing, expired, or without Contents read on this repo. Recheck step 3; try a classic `repo` token. |

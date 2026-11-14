@@ -45,7 +45,7 @@ import { taskStatusIconProps } from "@/lib/task-status-presentation";
 const DASHBOARD_ACTIVITY_LIMIT = 10;
 
 // Change this string, rebuild, and reload to confirm a new local or VM build is the one you are looking at.
-const CHIMERA_BUILD_MARKER = "local-test-1";
+const CHIMERA_BUILD_MARKER = "vm-update-test-2";
 
 function getRecentIssues(issues: Issue[]): Issue[] {
   return [...issues]
