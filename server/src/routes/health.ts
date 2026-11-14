@@ -408,6 +408,10 @@ export function healthRoutes(
       const redactedWarnings = redactedDatabaseBackup?.warnings.length ? redactedDatabaseBackup.warnings : undefined;
       res.json({
         status: healthStatus,
+        // Chimera fork: `paperclipai update` validates the restarted service by
+        // reading serverVersion from this anonymous health response. Authenticated
+        // mode redacts it, so every update rolled back. A version string is not secret.
+        serverVersion,
         deploymentMode: opts.deploymentMode,
         deploymentExposure: opts.deploymentExposure,
         localAiLoginSupported: supportsLocalAiLogin(opts),
