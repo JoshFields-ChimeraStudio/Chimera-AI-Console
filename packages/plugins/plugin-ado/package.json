@@ -1,0 +1,44 @@
+{
+  "name": "@chimera/plugin-ado",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Azure DevOps integration for the Chimera AI Console: listens for ADO service hook events on an Azure Service Bus queue and syncs work items with tasks.",
+  "scripts": {
+    "prebuild": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps",
+    "build": "node ./esbuild.config.mjs",
+    "dev": "node ./esbuild.config.mjs --watch",
+    "test": "vitest run --config ./vitest.config.ts",
+    "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit"
+  },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
+  "keywords": [
+    "paperclip",
+    "plugin",
+    "connector",
+    "azure-devops"
+  ],
+  "author": "Chimera Studio",
+  "license": "MIT",
+  "dependencies": {
+    "@azure/service-bus": "^7.10.0",
+    "@paperclipai/plugin-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.18",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  }
+}

@@ -63,22 +63,22 @@ Found by searching this checkout. "Not found" means my searches turned up nothin
 | E3 | Group chat with several agents (design spike first) | P3 | L | E2, D1, D2, D9 |
 | E4 | Turn a chat into an ADO work item or Grimoire document | P3 | M | A8, C2 |
 
-Suggested order: finish the local Docker and VM deploy path first (see "Prerequisites"), then D1 (investigation) and B1/B2 (fast wins: less wasted tokens, no more manual log pulling), then D3, A1, A2, A4, A8 and D4, then the rest. The chat items (E) can follow once those are under way; E1 and E2 are independent of the rest.
+Suggested order: the deploy path (P0) is done; then D1 (investigation) and B1/B2 (fast wins: less wasted tokens, no more manual log pulling), then D3, A1, A2, A4, A8 and D4, then the rest. The chat items (E) can follow once those are under way; E1 and E2 are independent of the rest.
 
 ## Prerequisites
 
-- **P0. Prove the deploy path.** Build locally with `doc/LOCAL-DOCKER.md`, then install the fork on the VM with `paperclipai install --repo ... --ref <tag>` and confirm rollback works (`CLAUDE.md`, "Deploy to the Azure VM"). Every item below relies on this loop. Unverified today.
+- **P0. Prove the deploy path.** Build locally with `doc/LOCAL-DOCKER.md`, then install the fork on the VM with `paperclipai install --repo ... --ref master` (a managed git install that follows the `master` branch, so `paperclipai update` picks up pushes) and confirm rollback works (`CLAUDE.md`, "Deploy to the Azure VM"). Every item below relies on this loop. **Done** (verified November 2026).
 
 ## A. ADO integration and task management
 
 Goal: ADO stays the system of record for work (pilot decision), Paperclip stays the place agents are woken and supervised, and the two stay in step without agents spending tokens on bookkeeping.
 
-**A1. Spike: how the integration is built (P1, S).** Options: (a) a Paperclip plugin using events, jobs and its own settings page; (b) a curated connection; (c) keep MCP-only as now. Leaning (a): it can react to Paperclip events, run scheduled jobs and add UI, while agents keep using the ADO MCP for rich operations. One real constraint: the VM is reachable only over the VPN, so ADO service hooks cannot call it directly. The cheap answer is not a classic relay but a **queue**: ADO service hooks can write events straight into an Azure Storage queue (or Service Bus queue), and the plugin polls that queue from the VM using outbound traffic only. Cost is pennies a month (see "Decisions"). Keep a slower reconciliation poll of ADO as a safety net for lost events. The spike must confirm: how ADO authenticates to the storage account (account key or service connection), the storage account's network settings so ADO can write to it, and whether a plugin can call the ADO MCP server or should call ADO's REST API directly (REST with the service-account PAT is probably simpler and easier to audit). Output: a short decision note and a thin working plugin skeleton that reads one event from the queue and fetches the work item.
+**A1. Spike: how the integration is built (P1, S).** *Done:* decisions in `doc/plans/2026-11-14-ado-integration.md`, skeleton in `packages/plugins/plugin-ado` (plugin, plain REST, a live Service Bus listener, and a catch-up that runs on startup and from a Sync now button; no polling or timers). Original scope: Options: (a) a Paperclip plugin using events, jobs and its own settings page; (b) a curated connection; (c) keep MCP-only as now. Leaning (a): it can react to Paperclip events, run scheduled jobs and add UI, while agents keep using the ADO MCP for rich operations. One real constraint: the VM is reachable only over the VPN, so ADO service hooks cannot call it directly. The cheap answer is not a classic relay but a **queue**: ADO service hooks can write events straight into an Azure Storage queue (or Service Bus queue), and the plugin polls that queue from the VM using outbound traffic only. Cost is pennies a month (see "Decisions"). Keep a slower reconciliation poll of ADO as a safety net for lost events. The spike must confirm: how ADO authenticates to the storage account (account key or service connection), the storage account's network settings so ADO can write to it, and whether a plugin can call the ADO MCP server or should call ADO's REST API directly (REST with the service-account PAT is probably simpler and easier to audit). Output: a short decision note and a thin working plugin skeleton that reads one event from the queue and fetches the work item.
 
 **A2. ADO work item as a first-class link (P1, M).** Today the convention is "ADO ID in the task title". Store the ADO org/project, work item ID, type (Story, Task, Bug, Defect, Documentation), state and URL as structured data on the task (plugin entity or the `origin_*` fields, to be decided in A1). Show it as a chip with a link in the task view and list filters, and search by ADO ID.
 *Done when:* every task created from ADO shows its link and current ADO state, and the title no longer needs the ID.
 
-**A3. ADO to Paperclip (P2, L).** The queue from A1 (plus a reconciliation poll) tells the plugin which ADO items are ready for an agent (rule to define, for example a state or tag on a Feature the director owns) and creates or updates the Paperclip task, assigned per A6. Replaces the director doing manual intake. Must be idempotent and must never reopen finished work.
+**A3. ADO to Paperclip (P2, L).** The Service Bus listener from A1 (plus the catch-up on startup and Sync now) tells the plugin which ADO items are ready for an agent (rule to define, for example a state or tag on a Feature the director owns) and creates or updates the Paperclip task, assigned per A6. Replaces the director doing manual intake. Must be idempotent and must never reopen finished work.
 
 **A4. State sync in code (P1, M).** Encode the rules from `skills/story-workflow` and `skills/studio-rules` (who sets which state on which work item type, Bugs vs Defects, Documentation items) as a mapping table in the plugin. When a Paperclip task changes status, the plugin updates the ADO state. Agents stop doing this through prompts, which saves tokens and removes a class of mistakes. Needs a decision on direction of truth when both change (ADO wins for humans' edits).
 
@@ -189,18 +189,18 @@ Open: which ADO project and parent a chat-created item defaults to, and whether 
 Made:
 
 1. **ADO writes go through our plugin** (A4, A7, A8), even if the plugin only wraps the MCP server underneath.
-2. **Inbound ADO events use ADO service hooks writing to an Azure queue**, which the plugin polls from the VM. No public endpoint. The A1 spike confirms the details.
+2. **Inbound ADO events use ADO service hooks sending to an Azure Service Bus queue (Basic tier)**, and the plugin keeps a listener on it over an outbound connection, so nothing polls and nothing is exposed publicly. Missed events are picked up by a catch-up on startup and from a Sync now button, not on a timer. Details and cost in `doc/plans/2026-11-14-ado-integration.md`.
 3. **First slice is a dummy ADO project with two throwaway agents**, not Tiamat (see "First slice").
 4. **Memory starts with the LLM Wiki plugin** (C1).
 5. **Agent instructions: git is the source of truth; agents change their own instructions only by submitting pull requests** (D3).
 6. **Added from the ideas list:** D1, D2, D3 (with self-update and download/upload), D4 (in-app plus Windows), D5 (as discovery), D6, D7, D8, D9 (with subscription breakdown). **Declined:** automated regression tests for agent behaviour; features are tested as they are built.
 
-Cost of the queue (checked November 2026; confirm in the Azure pricing calculator): ADO supports Storage queue and Service Bus queue as service hook targets. Queue Storage charges per GB stored plus per 10,000 operations; sources quote $0.0004 to $0.004 per 10,000. Polling every 10 seconds is about 260,000 operations a month, roughly 10 cents at the higher rate. Azure Relay Hybrid Connections charges per connected listener (about $10/month at a third-party quoted rate) and is more work, so it is not the plan.
+Cost: Service Bus Basic is about $0.05 per million operations (checked November 2026; confirm in the Azure pricing calculator). Azure Relay and Event Grid push were rejected because both need a public endpoint.
 
 Still open:
 
 1. ~~Where the wiki lives~~ Decided: the plugin points directly at the Grimoire repo, and Grimoire's layout may change to suit it. Work for C2: check how the plugin's `raw/` and `wiki/` layout maps onto Grimoire's current layout and front-matter, and agree the changes.
-2. Which ADO project name and repo for the slice (you are creating it).
+2. ~~Which ADO project name and repo for the slice~~ Decided: project `AI Testing`, repo `SimpleRepo` (https://dev.azure.com/ChimeraStudioSoftware/AI%20Testing/_git/SimpleRepo). The event queue lives in the personal sandbox subscription next to the VM.
 
 ## First slice
 

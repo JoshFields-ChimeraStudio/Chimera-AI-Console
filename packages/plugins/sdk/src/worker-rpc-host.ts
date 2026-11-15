@@ -656,8 +656,11 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             init: Object.keys(serializedInit).length > 0 ? serializedInit : undefined,
           });
 
-          // Reconstruct a Response-like object from the serialized result
-          return new Response(result.body, {
+          // Reconstruct a Response-like object from the serialized result.
+          // Fork patch: 204/205/304 must have a null body, or the Response
+          // constructor throws (e.g. Azure Storage Delete Message returns 204).
+          const nullBodyStatus = result.status === 204 || result.status === 205 || result.status === 304;
+          return new Response(nullBodyStatus ? null : result.body, {
             status: result.status,
             statusText: result.statusText,
             headers: result.headers,
