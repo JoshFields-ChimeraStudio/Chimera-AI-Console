@@ -3,9 +3,11 @@
 import { describe, expect, it } from "vitest";
 import type { ExternalObjectSummary, Issue } from "@paperclipai/shared";
 import {
+  ADO_LINKED_ORIGIN_KIND,
   applyIssueFilters,
   countActiveIssueFilters,
   defaultIssueFilterState,
+  issueCreationRequestFilters,
   normalizeIssueFilterState,
   resolveIssueFilterWorkspaceId,
   searchIssueFilterOptions,
@@ -98,6 +100,20 @@ describe("issue filters", () => {
     expect(countActiveIssueFilters(filters, true)).toBe(1);
     expect(normalizeIssueFilterState({ routineTasksOnly: true }).routineTasksOnly).toBe(true);
     expect(normalizeIssueFilterState({ routineTasksOnly: "true" }).routineTasksOnly).toBe(false);
+  });
+
+  it("selects only ADO-linked tasks, including automatic ones, and asks the server by origin kind", () => {
+    const linked = makeIssue({ id: "linked", originKind: "plugin:chimera.plugin-ado:workitem" as Issue["originKind"], createdByUserId: "person" });
+    const fromAdo = makeIssue({ id: "from-ado", originKind: "plugin:chimera.plugin-ado:workitem" as Issue["originKind"] });
+    const issues = [makeIssue({ id: "manual", createdByUserId: "person" }), linked, fromAdo,
+      makeIssue({ id: "routine", originKind: "routine_execution", createdByUserId: "person" })];
+    const filters = { ...defaultIssueFilterState, adoTasksOnly: true };
+    expect(applyIssueFilters(issues, filters, null, true)).toEqual([linked, fromAdo]);
+    expect(countActiveIssueFilters(filters, true)).toBe(1);
+    expect(issueCreationRequestFilters(filters, true)).toEqual({ originKind: ADO_LINKED_ORIGIN_KIND, includeRoutineExecutions: true, includeAgentCreatedTasks: true });
+    expect(normalizeIssueFilterState({ adoTasksOnly: true }).adoTasksOnly).toBe(true);
+    // A linked human task is still an ordinary task when the filter is off.
+    expect(applyIssueFilters(issues, defaultIssueFilterState, null, true).map((issue) => issue.id)).toEqual(["manual", "linked"]);
   });
 
   it("defaults legacy and invalid preferences to hidden without losing other filters", () => {

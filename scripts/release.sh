@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Chimera fork: in-repo plugins ship only with the managed git install, never in an npm release.
+export PAPERCLIP_SKIP_SHIPPED_PLUGINS=1
+
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=./release-lib.sh
 . "$REPO_ROOT/scripts/release-lib.sh"

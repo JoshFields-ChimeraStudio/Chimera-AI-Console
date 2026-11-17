@@ -4,6 +4,10 @@ import { AdoClient, AdoError, type WorkItemSummary } from "./ado/client.js";
 import { decodeMessageBody, parseAdoEvent, type AdoEvent } from "./ado/events.js";
 import { serviceBusListener, type EventListener, type ListenerFactory, type MessageOutcome } from "./ado/servicebus.js";
 import { ACTION_KEYS, DATA_KEYS } from "./manifest.js";
+import type { PluginDeps } from "./deps.js";
+import { registerLinkFeatures, type LinkFeatures } from "./links/index.js";
+import type { LinkRepository } from "./links/repository.js";
+import { registerAgentTools, type AgentTools } from "./tools/index.js";
 
 /** How far back the very first catch-up looks when there is no watermark yet. */
 const FIRST_SYNC_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -105,6 +109,8 @@ export interface AdoPluginOptions {
   retryDelayMs?: (deliveryCount: number) => number;
   /** Wait between attempts to list companies after a restart; tests set this to zero. */
   recoveryDelayMs?: number;
+  /** Link storage; tests pass an in-memory one because the test harness has no database. */
+  linkRepository?: (ctx: PluginContext) => LinkRepository;
 }
 
 export function createAdoPlugin(options: AdoPluginOptions = {}) {
@@ -117,6 +123,8 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
   /** Companies that already had their startup catch-up in this worker's life. */
   const caughtUp = new Set<string>();
   let ctx: PluginContext | null = null;
+  let links: LinkFeatures | null = null;
+  let tools: AgentTools | null = null;
 
   function runtime(companyId: string): CompanyRuntime {
     let rt = runtimes.get(companyId);
@@ -154,10 +162,28 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
 
   /**
    * The one place a changed work item is handled, whether it came from a live
-   * event or from a catch-up. A2/A3 add "find or create the linked task" here.
+   * event or from a catch-up. A2 refreshes linked tasks here; A3 adds creating them.
    */
   async function processWorkItem(c: PluginContext, companyId: string, item: WorkItemSummary, source: string): Promise<void> {
     c.logger.info("ADO work item changed", { companyId, source, workItemId: item.id, type: item.type, state: item.state, rev: item.rev });
+    await links?.onWorkItemChanged(companyId, item, source);
+  }
+
+  function makeDeps(c: PluginContext): PluginDeps {
+    return {
+      ctx: c,
+      now,
+      async settings(companyId) {
+        const config = await c.config.get(companyId);
+        if (!isConfigured(config)) return null;
+        return { orgUrl: config.orgUrl, project: config.project, serviceAccountName: config.serviceAccountName };
+      },
+      async adoClient(companyId) {
+        const config = await c.config.get(companyId);
+        if (!isConfigured(config)) throw new Error("The Azure DevOps plugin is not configured for this company");
+        return adoClient(c, companyId, config);
+      },
+    };
   }
 
   async function handleEvent(
@@ -198,6 +224,13 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       if (err instanceof AdoError && err.status === 404) {
         // Deleted, moved or not visible to the service account: retrying will not help.
         c.logger.warn("ADO item not found; dropping event", { eventId: event.eventId, eventType: event.target.eventType });
+        if (event.target.kind === "workitem") {
+          // A linked task keeps its link, marked as missing, so the loss is visible.
+          const workItemId = event.target.workItemId;
+          await links?.onWorkItemMissing?.(companyId, workItemId, event.target.eventType).catch((e) =>
+            c.logger.warn("Could not mark ADO link as missing", { workItemId, error: errorText(e) }),
+          );
+        }
         return { outcome: "complete" };
       }
       if (err instanceof AdoError && err.status === 401) runtime(companyId).pat = undefined;
@@ -386,6 +419,9 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
 
     async setup(c) {
       ctx = c;
+      const deps = makeDeps(c);
+      links = registerLinkFeatures(deps, options.linkRepository?.(c));
+      tools = registerAgentTools(deps, links);
 
       c.data.register(DATA_KEYS.status, async (params): Promise<AdoStatus> => {
         const companyId = companyIdFrom(params);
@@ -421,6 +457,7 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       const companyId = context?.companyId;
       const c = ctx;
       if (!c || !companyId) return;
+      await tools?.onConfigChanged(companyId, newConfig);
       // Started outside this invocation so the listener and catch-up keep working after it returns.
       await inBackground(() => applyConfig(c, companyId, newConfig));
     },

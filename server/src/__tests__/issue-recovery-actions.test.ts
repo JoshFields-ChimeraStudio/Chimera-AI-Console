@@ -47,7 +47,7 @@ import { issueService } from "../services/issues.js";
 import { caseHandoffService } from "../services/case-handoffs.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { withNativeWorkspaceFinalizationOwnership } from "../services/native-runtime/native-workspace-finalization-ownership.js";
-import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
+import { isPluginManagedIssueLifecycle, noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
 
 const external = resolveExternalTestDatabaseUrl("PAPERCLIP_RECOVERY_ACTION_TEST_DATABASE_URL");
 const embeddedPostgresSupport = external ? { supported: true, reason: undefined } : await getEmbeddedPostgresTestSupport();
@@ -88,6 +88,14 @@ function makeRecoveryActionRow(overrides: Record<string, unknown> = {}) {
 
 // Stranded-run fixtures began before anything the test later records.
 const LATEST_RUN_TIMES = { startedAt: new Date(), createdAt: new Date() };
+
+describe("plugin-managed lifecycle", () => {
+  it("leaves plugin-origin tasks to the plugin, except plain external links", () => {
+    expect(isPluginManagedIssueLifecycle({ originKind: "plugin:workflow:anchor" })).toBe(true);
+    expect(isPluginManagedIssueLifecycle({ originKind: "manual" })).toBe(false);
+    expect(isPluginManagedIssueLifecycle({ originKind: "plugin:chimera.plugin-ado:workitem" })).toBe(false);
+  });
+});
 
 describe("issueRecoveryActionService", () => {
   it.each(["unrelated unique constraint", "other SQLSTATE", "cyclic cause"])("does not retry %s errors", async kind => {

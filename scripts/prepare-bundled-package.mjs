@@ -5,6 +5,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, re
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SHIPPED_PLUGIN_STAGE_DIR, stageShippedPlugins } from "./shipped-plugins.mjs";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const nativeTargets = ["linux-x64", "darwin-arm64", "darwin-x64"];
@@ -435,9 +436,20 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
     const sourcePath = resolve(sourceDir, entry);
     if (existsSync(sourcePath)) cpSync(sourcePath, resolve(destinationDir, entry));
   }
+  // Chimera fork: build the in-repo plugins listed in scripts/shipped-plugins.json
+  // and ship a copy inside the server package, so the managed git install payload
+  // carries them and the server installs or rebinds them at startup.
+  // npm releases (scripts/release.sh) set PAPERCLIP_SKIP_SHIPPED_PLUGINS=1 so a published
+  // @paperclipai/server never carries our plugins to other people's installs.
+  const shippedPlugins = sourcePackage.name === "@paperclipai/server" && process.env.PAPERCLIP_SKIP_SHIPPED_PLUGINS !== "1"
+    ? stageShippedPlugins(sourceRoot, resolve(destinationDir, SHIPPED_PLUGIN_STAGE_DIR))
+    : [];
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
   const publishManifest = materializePublishManifest(sourcePackage);
+  if (shippedPlugins.length > 0 && !(publishManifest.files ?? []).includes(SHIPPED_PLUGIN_STAGE_DIR)) {
+    publishManifest.files = [...(publishManifest.files ?? []), SHIPPED_PLUGIN_STAGE_DIR];
+  }
   // Chimera fork: the staged copy is packed outside the pnpm workspace, so the
   // source package's pack-time hooks (prepack builds the UI and server, postpack
   // cleans up) cannot run there and would fail `npm pack`. Both are already done.

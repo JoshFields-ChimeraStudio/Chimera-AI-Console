@@ -2190,7 +2190,21 @@ export function buildHostServices(
         delete patch.actorUserId;
         delete patch.actorRunId;
         if (patch.originKind !== undefined) {
-          patch.originKind = normalizePluginOriginKind(patch.originKind);
+          // Fork patch (Chimera): a plugin may move a task between "manual" and its own
+          // namespace only. It may not relabel a task that has another origin (a routine
+          // run, another plugin's task), and may reset to "manual" only from its own namespace.
+          const current = typeof existing.originKind === "string" ? existing.originKind : "manual";
+          const currentIsOwn = current === defaultPluginOriginKind || current.startsWith(`${defaultPluginOriginKind}:`);
+          if (patch.originKind === "manual") {
+            if (!currentIsOwn && current !== "manual") {
+              throw new Error(`Plugin may only reset originKind to manual from ${defaultPluginOriginKind}`);
+            }
+          } else {
+            patch.originKind = normalizePluginOriginKind(patch.originKind);
+            if (!currentIsOwn && current !== "manual") {
+              throw new Error(`Plugin may only change the originKind of manual tasks or tasks under ${defaultPluginOriginKind}`);
+            }
+          }
         }
         const updated = (await issues.update(params.issueId, {
           ...(patch as any),

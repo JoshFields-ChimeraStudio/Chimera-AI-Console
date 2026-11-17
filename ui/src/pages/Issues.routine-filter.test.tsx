@@ -23,11 +23,13 @@ vi.mock("../api/agents", () => ({ agentsApi: { list: async () => [] } }));
 vi.mock("../api/projects", () => ({ projectsApi: { list: async () => [] } }));
 vi.mock("../api/heartbeats", () => ({ heartbeatsApi: { liveRunsForCompany: async () => [] } }));
 vi.mock("../hooks/useUpdateIssueMutation", () => ({ useUpdateIssueMutation: () => ({ mutate: vi.fn() }) }));
-vi.mock("../components/IssuesList", () => ({ IssuesList: ({ issues, routineTasksOnly, onRoutineTasksOnlyChange, onLoadMoreIssues, sort, onSortChange, searchFilters }: {
+vi.mock("../components/IssuesList", () => ({ IssuesList: ({ issues, routineTasksOnly, onRoutineTasksOnlyChange, adoTasksOnly, onAdoTasksOnlyChange, onLoadMoreIssues, sort, onSortChange, searchFilters }: {
   searchFilters?: Record<string, unknown>;
   sort?: IssueSort; onSortChange: (sort: IssueSort) => void; issues: Issue[]; routineTasksOnly: boolean; onRoutineTasksOnlyChange: (checked: boolean) => void; onLoadMoreIssues: () => void;
+  adoTasksOnly: boolean; onAdoTasksOnlyChange: (checked: boolean) => void;
 }) => <>
   <label><input type="checkbox" checked={routineTasksOnly} onChange={event => onRoutineTasksOnlyChange(event.target.checked)} />Routine tasks</label>
+  <label><input data-ado type="checkbox" checked={adoTasksOnly} onChange={event => onAdoTasksOnlyChange(event.target.checked)} />Linked to ADO</label>
   <button onClick={onLoadMoreIssues}>Load more</button>
   <button data-sort onClick={() => onSortChange({ sortField: "created", sortDir: sort?.sortDir === "desc" ? "asc" : "desc" })}>Created</button>
   <output data-search-filters={JSON.stringify(searchFilters)}>{issues.map(issue => issue.id).join(",")}</output>
@@ -118,6 +120,30 @@ it("restores URL sorting, resets paging on a sort click, and preserves routine f
     expect(mocks.list.mock.lastCall?.[1]).toMatchObject({ sortField: "created", sortDir: "asc", originKind: "routine_execution", participantAgentId: "agent", offset: 0 });
     const params = new URLSearchParams(host.querySelector("p")!.textContent!);
     expect(Object.fromEntries(params)).toMatchObject({ view: "all", originKind: "routine_execution", sortField: "created", sortDir: "asc", participantAgentId: "agent" });
+  } finally {
+    flushSync(() => root.unmount()); client.clear(); host.remove();
+  }
+});
+
+it("filters to ADO-linked tasks by origin kind, and switching to routines replaces it", async () => {
+  const prefix = "plugin:chimera.plugin-ado:workitem";
+  mocks.list.mockImplementation(async (_company, filters) => filters.originKind === prefix ? [{ id: "ado-task" }]
+    : filters.originKind === "routine_execution" ? [{ id: "routine-task" }] : [{ id: "human-task" }]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const host = document.createElement("div"); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    flushSync(() => root.render(<QueryClientProvider client={client}><MemoryRouter initialEntries={[`/issues?view=all&originKind=${encodeURIComponent(prefix)}`]}><Issues /></MemoryRouter></QueryClientProvider>));
+    await vi.waitFor(() => expect(host.querySelector("output")?.textContent).toBe("ado-task"));
+    expect(host.querySelector<HTMLInputElement>("[data-ado]")?.checked).toBe(true);
+    expect(mocks.list.mock.lastCall?.[1]).toMatchObject({ originKind: prefix, includeAgentCreatedTasks: true, offset: 0 });
+    expect(JSON.parse(host.querySelector("output")!.getAttribute("data-search-filters")!)).toEqual({ originKind: prefix });
+    flushSync(() => host.querySelector("input")!.click());
+    await vi.waitFor(() => expect(host.querySelector("output")?.textContent).toBe("routine-task"));
+    expect(Object.fromEntries(new URLSearchParams(host.querySelector("p")!.textContent!))).toEqual({ view: "all", originKind: "routine_execution" });
+    flushSync(() => host.querySelector<HTMLInputElement>("[data-ado]")!.click());
+    await vi.waitFor(() => expect(host.querySelector("output")?.textContent).toBe("ado-task"));
+    expect(Object.fromEntries(new URLSearchParams(host.querySelector("p")!.textContent!))).toEqual({ view: "all", originKind: prefix });
   } finally {
     flushSync(() => root.unmount()); client.clear(); host.remove();
   }

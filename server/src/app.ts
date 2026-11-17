@@ -204,6 +204,7 @@ import {
 } from "./services/bundled-plugins.js";
 import { createBundledPluginPackageResolver } from "./services/bundled-plugin-package.js";
 import { readDistributionPluginCatalog, distributionPluginActivationGuard } from "./services/distribution-plugin-catalog.js";
+import { reconcileShippedPlugins, resolveShippedPluginSource, type ShippedPluginSource } from "./services/shipped-plugins.js";
 import {
   createPluginWorkerManager,
   type PluginWorkerManager,
@@ -477,6 +478,12 @@ export async function createApp(
     managedPluginAutoInstall?: readonly string[] | null;
     /** Test override for the bundled plugin catalog root. */
     bundledPluginCatalogRoot?: string;
+    /**
+     * Chimera fork: where the in-repo shipped plugins come from (see
+     * services/shipped-plugins.ts). Absent ⇒ resolved from the server's own
+     * location; `null` ⇒ none. Ignored on managed-cloud instances.
+     */
+    shippedPluginSource?: ShippedPluginSource | null;
   },
 ) {
   const app = express();
@@ -1307,12 +1314,17 @@ export async function createApp(
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });
+  // Chimera fork: in-repo plugins listed in scripts/shipped-plugins.json are
+  // installed or rebound to the copy that ships with this server (self-hosted only).
+  const shippedPluginSource = managedAutoInstallKeys !== null
+    ? null
+    : opts.shippedPluginSource === undefined ? resolveShippedPluginSource() : opts.shippedPluginSource;
   const devWatcher = managedAutoInstallKeys !== null ? null : createPluginDevWatcher(
     lifecycle,
     async (pluginId) =>
       (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
     undefined,
-    { unwatchedRoots: [bundledCatalogRoot] },
+    { unwatchedRoots: [bundledCatalogRoot, ...(shippedPluginSource?.kind === "payload" ? [shippedPluginSource.root] : [])] },
   );
   // Auto-provision bundled plugins so their providers are registered for
   // agent runs. Bundles are excluded from the pnpm
@@ -1355,6 +1367,7 @@ export async function createApp(
     // still enter upgrade_pending so enabling them requires an operator decision.
     { reinstallUninstalled: managedAutoInstallKeys !== null, preservePackagePath: managedAutoInstallKeys !== null },
   )
+    .then(() => reconcileShippedPlugins(shippedPluginSource, { registry: pluginRegistry, loader, lifecycle, logger }))
     .then(() => loader.loadAll())
     .then((result) => {
       if (!result) return;

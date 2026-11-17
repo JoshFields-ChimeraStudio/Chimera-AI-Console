@@ -1699,7 +1699,19 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         if (!isInCompany(record, companyId)) throw new Error(`Issue not found: ${issueId}`);
         const { blockedByIssueIds: nextBlockedByIssueIds, ...issuePatch } = patch;
         if (issuePatch.originKind !== undefined) {
-          issuePatch.originKind = normalizePluginOriginKind(issuePatch.originKind);
+          // Mirrors the host: a plugin moves a task only between "manual" and its own namespace.
+          const current = typeof record.originKind === "string" ? record.originKind : "manual";
+          const currentIsOwn = current === defaultPluginOriginKind || current.startsWith(`${defaultPluginOriginKind}:`);
+          if ((issuePatch.originKind as string) === "manual") {
+            if (!currentIsOwn && current !== "manual") {
+              throw new Error(`Plugin may only reset originKind to manual from ${defaultPluginOriginKind}`);
+            }
+          } else {
+            issuePatch.originKind = normalizePluginOriginKind(issuePatch.originKind);
+            if (!currentIsOwn && current !== "manual") {
+              throw new Error(`Plugin may only change the originKind of manual tasks or tasks under ${defaultPluginOriginKind}`);
+            }
+          }
         }
         const updated: Issue = {
           ...record,

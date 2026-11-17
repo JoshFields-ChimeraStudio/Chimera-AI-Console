@@ -21,6 +21,7 @@ import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
 import { EmptyState } from "../components/EmptyState";
 import { IssuesList } from "../components/IssuesList";
 import { readIssueSortParams, type IssueSort } from "../lib/issue-sort";
+import { ADO_LINKED_ORIGIN_KIND } from "../lib/issue-filters";
 import { TaskViewsMenu } from "../components/TaskViewsMenu";
 import { Button } from "@/components/ui/button";
 import { CircleDot, Plus } from "lucide-react";
@@ -204,14 +205,26 @@ function OrganizationIssues({
     }, { replace: true });
   }, [setSearchParams, syncedSearch]);
   const routineTasksOnly = searchParams.get("originKind") === "routine_execution";
-  const includeAgentCreatedTasks = showAgentCreatedTasks || routineTasksOnly;
-  const originKind = routineTasksOnly ? "routine_execution" : undefined;
+  // Fork patch (Chimera): "Linked to ADO" uses the same originKind URL filter, so the two replace each other.
+  const adoTasksOnly = searchParams.get("originKind") === ADO_LINKED_ORIGIN_KIND;
+  const includeAgentCreatedTasks = showAgentCreatedTasks || routineTasksOnly || adoTasksOnly;
+  const originKind = routineTasksOnly ? "routine_execution" : adoTasksOnly ? ADO_LINKED_ORIGIN_KIND : undefined;
   const handleRoutineTasksOnlyChange = useCallback((checked: boolean) => {
     setSearchParams(current => {
       const next = new URLSearchParams(current);
       if (syncedSearch) next.set("q", syncedSearch);
       else next.delete("q");
       if (checked) next.set("originKind", "routine_execution");
+      else next.delete("originKind");
+      return next;
+    }, { replace: true });
+  }, [setSearchParams, syncedSearch]);
+  const handleAdoTasksOnlyChange = useCallback((checked: boolean) => {
+    setSearchParams(current => {
+      const next = new URLSearchParams(current);
+      if (syncedSearch) next.set("q", syncedSearch);
+      else next.delete("q");
+      if (checked) next.set("originKind", ADO_LINKED_ORIGIN_KIND);
       else next.delete("originKind");
       return next;
     }, { replace: true });
@@ -363,6 +376,8 @@ function OrganizationIssues({
       enableAgentCreatedVisibilityFilter
       routineTasksOnly={routineTasksOnly}
       onRoutineTasksOnlyChange={handleRoutineTasksOnlyChange}
+      adoTasksOnly={adoTasksOnly}
+      onAdoTasksOnlyChange={handleAdoTasksOnlyChange}
       sort={sort}
       onSortChange={handleSortChange}
       hasMoreIssues={hasMoreServerIssues}

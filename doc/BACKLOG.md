@@ -24,12 +24,12 @@ Found by searching this checkout. "Not found" means my searches turned up nothin
 |---|---|---|---|---|
 | **A. ADO integration and task management** | | | | |
 | A1 | Spike: plugin skeleton, event queue, MCP vs REST | P1 | S | |
-| A2 | ADO work item as a first-class link on a task | P1 | M | A1 |
+| A2 | ADO work item as a first-class link on a task | P1 | done | A1 |
 | A3 | ADO to Paperclip: pick up work automatically | P2 | L | A1, A2 |
 | A4 | Paperclip to ADO: state sync done in code, not prompts | P1 | M | A2 |
 | A5 | ADO pull request on the task, wake on review activity | P2 | L | A2 |
 | A6 | Routing and assignment rules, WIP limits | P2 | M | A2 |
-| A7 | Automatic agent attribution in ADO | P3 | S | A4 |
+| A7 | Automatic agent attribution in ADO | P3 | done | A4 |
 | A8 | Plugin-provided ADO tools for agents | P1 | M | A1 |
 | **B. Logging and debugging** | | | | |
 | B1 | Run explorer (replaces pull-logs and analyze-logs) | P1 | M | |
@@ -57,6 +57,7 @@ Found by searching this checkout. "Not found" means my searches turned up nothin
 | D7 | Proper worktree provisioning | P2 | M | |
 | D8 | Docs publisher as a scheduled job (no agent) | P2 | M | C2 |
 | D9 | Cost and usage visibility, including subscription usage | P2 | M-L | B1 |
+| D10 | In-repo plugins ship with the code (install and update with the deploy) | P1 | done | |
 | **E. Chat** | | | | |
 | E1 | Delete a chat | P2 | S-M | |
 | E2 | Multiple chat sessions per agent | P2 | M | |
@@ -75,20 +76,20 @@ Goal: ADO stays the system of record for work (pilot decision), Paperclip stays 
 
 **A1. Spike: how the integration is built (P1, S).** *Done:* decisions in `doc/plans/2026-11-14-ado-integration.md`, skeleton in `packages/plugins/plugin-ado` (plugin, plain REST, a live Service Bus listener, and a catch-up that runs on startup and from a Sync now button; no polling or timers). Original scope: Options: (a) a Paperclip plugin using events, jobs and its own settings page; (b) a curated connection; (c) keep MCP-only as now. Leaning (a): it can react to Paperclip events, run scheduled jobs and add UI, while agents keep using the ADO MCP for rich operations. One real constraint: the VM is reachable only over the VPN, so ADO service hooks cannot call it directly. The cheap answer is not a classic relay but a **queue**: ADO service hooks can write events straight into an Azure Storage queue (or Service Bus queue), and the plugin polls that queue from the VM using outbound traffic only. Cost is pennies a month (see "Decisions"). Keep a slower reconciliation poll of ADO as a safety net for lost events. The spike must confirm: how ADO authenticates to the storage account (account key or service connection), the storage account's network settings so ADO can write to it, and whether a plugin can call the ADO MCP server or should call ADO's REST API directly (REST with the service-account PAT is probably simpler and easier to audit). Output: a short decision note and a thin working plugin skeleton that reads one event from the queue and fetches the work item.
 
-**A2. ADO work item as a first-class link (P1, M).** Today the convention is "ADO ID in the task title". Store the ADO org/project, work item ID, type (Story, Task, Bug, Defect, Documentation), state and URL as structured data on the task (plugin entity or the `origin_*` fields, to be decided in A1). Show it as a chip with a link in the task view and list filters, and search by ADO ID.
+**A2. ADO work item as a first-class link (P1, M).** *Done:* link and unlink on the task, chip with state, "Linked to ADO" list filter and search by ADO ID; see decision 6 and "Task UI" in `doc/plans/2026-11-14-ado-integration.md`. Original scope: Today the convention is "ADO ID in the task title". Store the ADO org/project, work item ID, type (Story, Task, Bug, Defect, Documentation), state and URL as structured data on the task (plugin entity or the `origin_*` fields, to be decided in A1). Show it as a chip with a link in the task view and list filters, and search by ADO ID.
 *Done when:* every task created from ADO shows its link and current ADO state, and the title no longer needs the ID.
 
 **A3. ADO to Paperclip (P2, L).** The Service Bus listener from A1 (plus the catch-up on startup and Sync now) tells the plugin which ADO items are ready for an agent (rule to define, for example a state or tag on a Feature the director owns) and creates or updates the Paperclip task, assigned per A6. Replaces the director doing manual intake. Must be idempotent and must never reopen finished work.
 
-**A4. State sync in code (P1, M).** Encode the rules from `skills/story-workflow` and `skills/studio-rules` (who sets which state on which work item type, Bugs vs Defects, Documentation items) as a mapping table in the plugin. When a Paperclip task changes status, the plugin updates the ADO state. Agents stop doing this through prompts, which saves tokens and removes a class of mistakes. Needs a decision on direction of truth when both change (ADO wins for humans' edits).
+**A4. State sync in code (P1, M).** Encode the rules from `skills/story-workflow` and `skills/studio-rules` (who sets which state on which work item type, Bugs vs Defects, Documentation items) as a mapping table in the plugin. When a Paperclip task changes status, the plugin updates the ADO state. Agents stop doing this through prompts, which saves tokens and removes a class of mistakes. Needs a decision on direction of truth when both change (ADO wins for humans' edits). Decided: the A8 agent tools enforce these rules too, so they live in one place.
 
 **A5. Pull request on the task (P2, L).** Show the linked ADO PR on the Paperclip task: status, policy checks, reviewer votes and the `[Ladon]` / architecture review comments. Poll for new review threads and wake the builder when review is finished, instead of relying on reviewers finishing Paperclip tasks by hand. Also enforces "the next agent starts only after the PR it depends on is merged" by auto-clearing the blocker when the PR completes.
 
 **A6. Routing and assignment (P2, M).** Rules mapping work item type / area path / tags to an agent so the director only handles exceptions; per-agent concurrency (WIP) limits so one agent isn't given five tasks at once; a queue view per agent. Keep the single-assignee invariant (`AGENTS.md` section 5).
 
-**A7. Automatic attribution in ADO (P3, S).** All agents share one service account, so comments and updates written by the plugin should carry the agent's name automatically (the `[Ladon]` convention), and an ADO field or tag records which agent last touched an item.
+**A7. Automatic attribution in ADO (P3, S).** *Done* with the A8 tools: `[Name]` prefix on every comment and history entry, and an `agent:<Name>` tag for the last agent to change an item; see "A8: agent tools" in `doc/plans/2026-11-14-ado-integration.md`. Original scope: All agents share one service account, so comments and updates written by the plugin should carry the agent's name automatically (the `[Ladon]` convention), and an ADO field or tag records which agent last touched an item.
 
-**A8. Plugin-provided ADO tools for agents (P1, M).** Decision: all agent writes to ADO go through the plugin. The plugin exposes a small set of tools to agents (read work item, comment, set state, link PR, create child item, depending on the agent's role) and performs the call itself, whether that is the MCP server or ADO's REST API underneath. Benefits: one place for permissions per agent role, automatic attribution (A7), every ADO write recorded in the Paperclip activity log, and the state rules from A4 enforced in code. Once tools reach parity, remove the direct ADO MCP server from the agents' configuration so there is only one route.
+**A8. Plugin-provided ADO tools for agents (P1, M).** *Done* except the A4 state rules and removing the ADO MCP server from agents, which stay open; tools and role table in `doc/plans/2026-11-14-ado-integration.md` ("A8: agent tools"). Original scope: Decision: all agent writes to ADO go through the plugin. The plugin exposes a small set of tools to agents (read work item, comment, set state, link PR, create child item, depending on the agent's role) and performs the call itself, whether that is the MCP server or ADO's REST API underneath. Benefits: one place for permissions per agent role, automatic attribution (A7), every ADO write recorded in the Paperclip activity log, and the state rules from A4 enforced in code. Once tools reach parity, remove the direct ADO MCP server from the agents' configuration so there is only one route.
 
 Open questions: which ADO projects first; the exact "ready for an agent" signal; whether agents should be allowed to create ADO items through the plugin or only through MCP.
 
@@ -158,6 +159,8 @@ Mostly drawn from what the pilot showed in `../PAPERCLIP-PILOT.md` (sections 3.9
 - Budget alerts before a hard stop (links to D4).
 - Model routing rules: Sonnet by default, Opus only for architecture work or after repeated failures.
 - Subscription breakdown: usage against the Claude subscription, by agent, task and day. Unknown how much of this is available. Run logs show context size, not billing, and the pilot never confirmed how subscription runs are reported. First step: find out what data exists (run logs, the CLI, the Claude usage page). If subscription limits are not exposed, estimate from tokens per run and compare against the Claude usage page by hand.
+
+**D10. In-repo plugins ship with the code (P1, done).** Plugins that live in this repo are listed in `scripts/shipped-plugins.json` and are built, deployed, updated and rolled back with the server, on the VM (managed git install) and in Docker, with no manual install step. The server installs them at startup, adopts an existing hand-made install of the same plugin and approves their capabilities. Adding another (the LLM Wiki plugin for C2) is one line in that list plus a `files` field in its `package.json`. How it works: `doc/DEPLOYMENT-STEPS.md`, "How in-repo plugins ship".
 
 ## E. Chat
 

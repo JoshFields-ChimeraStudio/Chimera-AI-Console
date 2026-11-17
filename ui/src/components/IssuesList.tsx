@@ -473,6 +473,9 @@ interface IssuesListProps {
   initialStatuses?: string[];
   routineTasksOnly?: boolean;
   onRoutineTasksOnlyChange?: (checked: boolean) => void;
+  /** Fork patch (Chimera): URL-owned "linked to ADO" filter, like routineTasksOnly. */
+  adoTasksOnly?: boolean;
+  onAdoTasksOnlyChange?: (checked: boolean) => void;
   /** URL sorting overrides the saved collection preference when supplied. */
   sort?: IssueSort;
   onSortChange?: (sort: IssueSort) => void;
@@ -726,6 +729,8 @@ function StreamlinedIssuesList({
   initialStatuses,
   routineTasksOnly,
   onRoutineTasksOnlyChange,
+  adoTasksOnly,
+  onAdoTasksOnlyChange,
   sort,
   onSortChange,
   initialSearch,
@@ -828,7 +833,8 @@ function StreamlinedIssuesList({
     ...savedViewState,
     ...sort,
     ...(routineTasksOnly === undefined ? {} : { routineTasksOnly }),
-  }), [savedViewState, sort, routineTasksOnly]);
+    ...(adoTasksOnly === undefined ? {} : { adoTasksOnly }),
+  }), [savedViewState, sort, routineTasksOnly, adoTasksOnly]);
   const showAgentCreatedTasks = useShowAgentCreatedTasks(selectedCompanyId, viewStateKey);
   useEffect(() => {
     if (!enableAgentCreatedVisibilityFilter) return;
@@ -885,6 +891,7 @@ function StreamlinedIssuesList({
 
   const updateView = useCallback((patch: Partial<IssueViewState>) => {
     if (patch.routineTasksOnly !== undefined) onRoutineTasksOnlyChange?.(patch.routineTasksOnly);
+    if (patch.adoTasksOnly !== undefined) onAdoTasksOnlyChange?.(patch.adoTasksOnly);
     if (patch.sortField !== undefined || patch.sortDir !== undefined) {
       onSortChange?.({
         sortField: patch.sortField ?? viewState.sortField,
@@ -906,6 +913,7 @@ function StreamlinedIssuesList({
     preferenceLocation.legacyViewStorageKey,
     visibleIssueColumns,
     onRoutineTasksOnlyChange,
+    onAdoTasksOnlyChange,
     onSortChange,
     sort,
     viewState.sortField,
@@ -1332,7 +1340,7 @@ function StreamlinedIssuesList({
     || viewState.boardColdLaneMode !== "auto"
     || viewState.boardColumnPageSize !== KANBAN_COLUMN_DEFAULT_PAGE_SIZE;
 
-  const hierarchyEnabled = enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && !viewState.routineTasksOnly && viewState.nestingEnabled && viewState.viewMode === "list";
+  const hierarchyEnabled = enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && !viewState.routineTasksOnly && !viewState.adoTasksOnly && viewState.nestingEnabled && viewState.viewMode === "list";
   const hierarchy = useIssueHierarchyContext(
     selectedCompanyId, filtered.slice(0, renderedIssueRowLimit), viewState.collapsedParents,
     hierarchyEnabled,
@@ -1436,10 +1444,10 @@ function StreamlinedIssuesList({
   ]);
   const groupedContent = useMemo(() => baseGroupedContent.map((group) => ({
     ...group,
-    items: enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && !viewState.routineTasksOnly && viewState.nestingEnabled && viewState.viewMode === "list"
+    items: enableAgentCreatedVisibilityFilter && !viewState.showAgentCreatedTasks && !viewState.routineTasksOnly && !viewState.adoTasksOnly && viewState.nestingEnabled && viewState.viewMode === "list"
       ? includeIssueHierarchyContext(group.items, [...issues, ...hierarchy.issues])
       : group.items,
-  })), [baseGroupedContent, hierarchy.issues, issues, enableAgentCreatedVisibilityFilter, viewState.showAgentCreatedTasks, viewState.routineTasksOnly, viewState.nestingEnabled, viewState.viewMode]);
+  })), [baseGroupedContent, hierarchy.issues, issues, enableAgentCreatedVisibilityFilter, viewState.showAgentCreatedTasks, viewState.routineTasksOnly, viewState.adoTasksOnly, viewState.nestingEnabled, viewState.viewMode]);
   const visibleListRowCount = groupedContent.reduce((total, group) => total + group.items.length, 0);
 
 
@@ -1983,6 +1991,7 @@ function StreamlinedIssuesList({
 
           <IssueFiltersPopover
             enableRoutineTasksFilter={routineTasksOnly !== undefined}
+            enableAdoTasksFilter={adoTasksOnly !== undefined}
             state={viewState}
             onChange={updateView}
             buttonVariant="outline"

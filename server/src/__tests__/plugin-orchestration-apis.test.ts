@@ -312,6 +312,44 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
         patch: { originKind: "plugin:other.plugin:feature" },
       }),
     ).rejects.toThrow("Plugin may only use originKind values under plugin:paperclip.missions");
+
+    // A plugin may hand its own origin back to "manual", but cannot take over another origin that way.
+    const released = await services.issues.update({
+      issueId: featureIssue.id,
+      companyId,
+      patch: { originKind: "manual", originId: null },
+    });
+    expect(released.originKind).toBe("manual");
+    expect(released.originId).toBeNull();
+
+    // A manual task can be labelled with the plugin's own origin.
+    const relabelled = await services.issues.update({
+      issueId: featureIssue.id,
+      companyId,
+      patch: { originKind: "plugin:paperclip.missions:feature", originId: "mission-alpha:feature-2" },
+    });
+    expect(relabelled.originKind).toBe("plugin:paperclip.missions:feature");
+
+    // A task with any other origin can be neither relabelled nor handed back as manual.
+    const routineIssueId = randomUUID();
+    await db.insert(issues).values({
+      id: routineIssueId,
+      companyId,
+      title: "Routine run",
+      status: "todo",
+      priority: "medium",
+      identifier: `${issuePrefix(companyId)}-routine`,
+      originKind: "routine_execution",
+      originId: "routine-1",
+    });
+    await expect(
+      services.issues.update({ issueId: routineIssueId, companyId, patch: { originKind: "plugin:paperclip.missions:feature" } }),
+    ).rejects.toThrow("Plugin may only change the originKind of manual tasks or tasks under plugin:paperclip.missions");
+    await expect(
+      services.issues.update({ issueId: routineIssueId, companyId, patch: { originKind: "manual" } }),
+    ).rejects.toThrow("Plugin may only reset originKind to manual from plugin:paperclip.missions");
+    const [routineRow] = await db.select().from(issues).where(eq(issues.id, routineIssueId));
+    expect(routineRow!.originKind).toBe("routine_execution");
   });
 
   it("creates plugin operation issues with the generic operation origin", async () => {

@@ -1,6 +1,6 @@
 import { issueDisplayStatusSql } from "./issue-display-status.js";
 import { sql, type SQL } from "drizzle-orm";
-import { COMPANY_SEARCH_MAX_QUERY_LENGTH, COMPANY_SEARCH_MAX_TOKENS } from "@paperclipai/shared";
+import { COMPANY_SEARCH_MAX_QUERY_LENGTH, COMPANY_SEARCH_MAX_TOKENS, LINKED_TASK_ORIGIN_KINDS } from "@paperclipai/shared";
 import { visibleIssueCondition } from "./issue-visibility.js";
 
 // Only grammatical filler is ignored, only in multi-term queries, and never
@@ -29,7 +29,11 @@ export function parseTaskSearch(text: string) {
   const patterns = tokens.map((token) => `%${escapeTaskSearchPattern(token)}%`);
   const containsPattern = `%${escapeTaskSearchPattern(phrase)}%`;
   const startsWithPattern = `${escapeTaskSearchPattern(phrase)}%`;
-  return { normalizedQuery, terms, tokens, phrase, identifierQuery, patterns, containsPattern, startsWithPattern };
+  // Fork patch (Chimera): an external item's ID ("123", "#123") or full origin ID
+  // ("org/project/123") finds the task linked to it through issues.origin_id.
+  const originId = normalizedQuery.replace(/^#/, "");
+  const originIdQuery = /^\d+$/.test(originId) || originId.includes("/") ? originId : null;
+  return { normalizedQuery, terms, tokens, phrase, identifierQuery, originIdQuery, patterns, containsPattern, startsWithPattern };
 }
 export type TaskSearch = ReturnType<typeof parseTaskSearch>;
 
@@ -106,7 +110,14 @@ export function taskSearchCtes(companyId: string, search: TaskSearch, includeCon
   const documentTerms = search.patterns.map((_, index) => sql`issues.id IN (SELECT issue_id FROM document_matches WHERE ord = ${index})`);
   const allTerms = issueTerms.map((term, index) => sql`(${term} OR ${commentTerms[index]!} OR ${documentTerms[index]!})`);
   const phraseMatch = (field: SQL) => n > 0 ? sql`coalesce(${field} ILIKE ${search.containsPattern}, false)` : sql`false`;
-  const identExact = n > 0 ? sql`lower(issues.identifier) = ${search.identifierQuery}` : sql`false`;
+  // Matches the last segment of origin_id ("org/project/123") or the whole of it; ranks like an identifier.
+  // Only for origins that link a task to an external item (LINKED_TASK_ORIGIN_KINDS), so other
+  // origins' ids (for example another plugin's owner/repo/123) never rank as exact hits.
+  const originExact = n > 0 && search.originIdQuery
+    ? sql`coalesce(issues.origin_kind IN (${sql.join(LINKED_TASK_ORIGIN_KINDS.map((kind) => sql`${kind}`), sql`, `)})
+      AND (lower(issues.origin_id) = ${search.originIdQuery} OR issues.origin_id ILIKE ${"%/" + escapeTaskSearchPattern(search.originIdQuery)}), false)`
+    : sql`false`;
+  const identExact = n > 0 ? sql`(lower(issues.identifier) = ${search.identifierQuery} OR ${originExact})` : sql`false`;
   const identStarts = n > 0 ? sql`issues.identifier ILIKE ${escapeTaskSearchPattern(search.identifierQuery) + "%"}` : sql`false`;
   const fuzzyAllowed = !search.terms.some((term) => term.quoted)
     && search.terms.some((term) => /^[\p{L}]{4,255}$/u.test(term.text))
@@ -168,6 +179,7 @@ export function taskSearchCtes(companyId: string, search: TaskSearch, includeCon
           OR ${taskSearchAny(sql`issues.identifier`, search)}
           OR ${taskSearchAny(sql`issues.description`, search)}
           OR ${identStarts}
+          OR ${originExact}
         )`}
       UNION SELECT issue_id FROM comment_matches
       UNION SELECT issue_id FROM document_matches

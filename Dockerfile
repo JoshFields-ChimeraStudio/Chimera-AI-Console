@@ -46,6 +46,7 @@ COPY --parents packages/plugins/sandbox-providers/./*/package.json packages/plug
 COPY packages/plugins/paperclip-plugin-fake-sandbox/package.json packages/plugins/paperclip-plugin-fake-sandbox/
 COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-wiki/
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
+COPY packages/plugins/plugin-ado/package.json packages/plugins/plugin-ado/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
 COPY packages/paperclip-runner/scripts/install-copilot-assets.mjs packages/paperclip-runner/scripts/materialize-copilot-binary.mjs packages/paperclip-runner/scripts/copilot-inner-distribution.mjs packages/paperclip-runner/scripts/
@@ -140,6 +141,11 @@ RUN find packages/paperclip-runner/runner packages/paperclip-runner/protocol -ty
 ARG PAPERCLIP_BUILD_COMMIT=""
 RUN pnpm --filter @paperclipai/ui build
 RUN pnpm --filter @paperclipai/plugin-sdk build
+# Chimera fork: build the in-repo plugins listed in scripts/shipped-plugins.json.
+# The server installs or rebinds them from /app/<dir> at startup
+# (server/src/services/shipped-plugins.ts). Each one also needs its
+# package.json copied in the deps stage above so its dependencies install.
+RUN node scripts/shipped-plugins.mjs build
 # The server build runs scripts/write-build-stamp.mjs, which stamps the built
 # commit into dist/build-info.json. The build context has no .git, so the
 # script reads PAPERCLIP_BUILD_COMMIT instead. Docker exposes an ARG to the

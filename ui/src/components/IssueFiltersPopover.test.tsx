@@ -71,6 +71,18 @@ describe("IssueFiltersPopover", () => {
     act(() => root.unmount());
   });
 
+  it.each(["legacy", "streamlined", "refreshed"] as const)("offers the Linked to ADO filter under Visibility in %s", presentation => {
+    const root = createRoot(container);
+    const onChange = vi.fn();
+    act(() => root.render(<IssueFiltersPopover enableRoutineTasksFilter enableAdoTasksFilter presentation={presentation} state={defaultIssueFilterState} onChange={onChange} activeFilterCount={0} />));
+    const visibility = container.querySelector('[data-filter-options="visibility"]');
+    const row = Array.from(visibility?.querySelectorAll("label") ?? []).find(label => label.textContent === "Linked to ADO");
+    expect(row?.querySelector("input")?.checked).toBe(false);
+    act(() => row?.querySelector("input")?.click());
+    expect(onChange).toHaveBeenCalledWith({ adoTasksOnly: true });
+    act(() => root.unmount());
+  });
+
   it.each(["legacy", "streamlined", "refreshed"] as const)("hides unsupported live filters in %s", presentation => {
     const root = createRoot(container);
     const props = { presentation, enableLiveRunsFilter: false, state: defaultIssueFilterState, onChange: vi.fn(), activeFilterCount: 0 };

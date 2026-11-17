@@ -31,6 +31,11 @@ export const taskSearchCorpus = [
   { key: "word-decoy", title: "Capistrano migration", description: "API details appear here.", comments: ["API is an incidental mention."] },
   { key: "freshness", title: "Reconcile billing ledger", status: "done" },
   { key: "freshness-noise", title: "Weekly financial update", comments: ["Reconcile billing ledger was one of many completed projects."] },
+  { key: "ado-link", title: "Publish pilot handbook", originKind: "plugin:chimera.plugin-ado:workitem", originId: "ChimeraStudioSoftware/AI Testing/4711" },
+  { key: "ado-number-decoy", title: "Bump retry budget to 4711 ms" },
+  { key: "ado-neighbor", title: "Archive pilot notes", originKind: "plugin:chimera.plugin-ado:workitem", originId: "ChimeraStudioSoftware/AI Testing/14711" },
+  { key: "ado-case", title: "Draft release letter", originKind: "plugin:chimera.plugin-ado:workitem", originId: "ChimeraStudioSoftware/AI Testing/Ab12" },
+  { key: "other-plugin-origin", title: "Mirror upstream issue", originKind: "plugin:acme.github:issue", originId: "acme/widgets/4711" },
 ] as const;
 
 export type TaskSearchCase = {
@@ -65,6 +70,11 @@ export const taskSearchCases: TaskSearchCase[] = [
   { name: "code identifier", q: "heartbeat_run_events", relevant: { "identifier-code": 3 }, first: "identifier-code" },
   { name: "unicode", q: "réparer mobile", relevant: { unicode: 3 }, first: "unicode" },
   { name: "whole word title", q: "api", relevant: { word: 3, "mobile-api": 3, "word-decoy": 1 } },
+  { name: "linked ADO work item ID", q: "4711", relevant: { "ado-link": 3, "ado-number-decoy": 1, "ado-neighbor": 1 }, first: "ado-link", absent: ["other-plugin-origin"] },
+  { name: "linked ADO work item #ID", q: "#4711", relevant: { "ado-link": 3 }, first: "ado-link", absent: ["ado-neighbor"] },
+  { name: "linked ADO full origin ID", q: "ChimeraStudioSoftware/AI Testing/4711", relevant: { "ado-link": 3 }, first: "ado-link", absent: ["ado-neighbor"] },
+  { name: "other plugin origin IDs are not searched", q: "acme/widgets/4711", relevant: {} },
+  { name: "origin ID suffix ignores case", q: "aI testing/ab12", relevant: { "ado-case": 3 }, first: "ado-case" },
   { name: "no result", q: "quasarxylophone", relevant: {} },
 ];
 

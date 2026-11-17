@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
+  "files": [
+    "dist",
+    "migrations"
+  ],
   "description": "Azure DevOps integration for the Chimera AI Console: listens for ADO service hook events on an Azure Service Bus queue and syncs work items with tasks.",
   "scripts": {
     "prebuild": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps",

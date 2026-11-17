@@ -16,4 +16,12 @@ describe("task search query intent", () => {
     expect(parseTaskSearch("T123-42").identifierQuery).toBe("t123-42");
     expect(parseTaskSearch("PAP-420").identifierQuery).toBe("pap-420");
   });
+
+  it("treats an external item ID or full origin ID as an origin lookup", () => {
+    expect(parseTaskSearch("123").originIdQuery).toBe("123");
+    expect(parseTaskSearch("#123").originIdQuery).toBe("123");
+    expect(parseTaskSearch("ChimeraStudioSoftware/AI Testing/123").originIdQuery).toBe("chimerastudiosoftware/ai testing/123");
+    expect(parseTaskSearch("fix login").originIdQuery).toBeNull();
+    expect(parseTaskSearch("PAP-42").originIdQuery).toBeNull();
+  });
 });

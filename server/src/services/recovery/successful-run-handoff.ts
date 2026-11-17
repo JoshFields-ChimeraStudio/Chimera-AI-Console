@@ -2,6 +2,7 @@ import { and, eq, inArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests, agents, heartbeatRuns, issues } from "@paperclipai/db";
 import {
+  isLinkedTaskOriginKind,
   isUuidLike,
   type IssueCommentMetadata,
   type IssueCommentPresentation,
@@ -73,7 +74,8 @@ export function isIdempotentFinishSuccessfulRunHandoffWakeStatus(status: string)
  * plugin-managed issues to the plugin's own recovery/enforcement path instead.
  */
 export function isPluginManagedIssueLifecycle(issue: { originKind?: string | null }) {
-  return Boolean(issue.originKind?.startsWith("plugin:"));
+  // Fork patch (Chimera): a plugin origin that only links the task to an external item does not own its lifecycle.
+  return Boolean(issue.originKind?.startsWith("plugin:")) && !isLinkedTaskOriginKind(issue.originKind);
 }
 
 type HeartbeatRunRow = typeof heartbeatRuns.$inferSelect;

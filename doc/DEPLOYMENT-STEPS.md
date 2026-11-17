@@ -117,6 +117,14 @@ done
 
 Any code (200, 301, 404...) means it connected. A timeout means something is blocking that host and the build will fail on it.
 
+The ADO plugin ships with the server (see "In-repo plugins" in section 9) and keeps an AMQP connection to Azure Service Bus open on **outbound TCP 5671**. Check it once, with your namespace name:
+
+```bash
+timeout 5 bash -c '</dev/tcp/<namespace>.servicebus.windows.net/5671' && echo "5671 ok" || echo "5671 blocked"
+```
+
+If it is blocked, open 5671 to `*.servicebus.windows.net` on the NSG/NAT path (or switch the plugin to WebSockets on 443; see `doc/plans/2026-11-14-ado-integration.md`). The plugin still installs without it, it just cannot receive ADO events.
+
 ## 5. Back up, then install
 
 **5.1 Back up the database and the config** (do not print the config; it contains secrets):
@@ -185,7 +193,7 @@ paperclipai update --rollback
 paperclipai doctor
 ```
 
-This switches `current` back and restarts the service. **It does not reverse database migrations.** If the new version changed the database and the old one cannot read it, you must restore the backup from step 5.1. This CLI has **no restore command**; restoring is a manual database operation. Before you need it, ask for help writing and testing the exact restore steps for this instance. Do not delete the backup until the new version has run cleanly for a few days.
+This switches `current` back and restarts the service, and the in-repo plugins switch back with it if the version you roll back to already ships them (section 9). **It does not reverse database migrations**, neither the server's nor a plugin's. If the new version changed the database and the old one cannot read it, you must restore the backup from step 5.1. This CLI has **no restore command**; restoring is a manual database operation. Before you need it, ask for help writing and testing the exact restore steps for this instance. Do not delete the backup until the new version has run cleanly for a few days.
 
 ## 9. Later updates
 
@@ -201,6 +209,19 @@ paperclipai update --rollback
 ```
 
 Each update needs `GH_TOKEN` set in that session (same as step 5.2) while the repo is private.
+
+### How in-repo plugins ship
+
+This is the one place that describes it; other docs link here.
+
+- **The list.** `scripts/shipped-plugins.json` names the in-repo plugins every deployment runs (`dir` and package `name`; today only `@chimera/plugin-ado`). To ship another one (for example `plugin-llm-wiki`), add it to that list. Each listed plugin needs a `files` field in its `package.json` naming what it needs at runtime (for plugin-ado: `dist` and `migrations`), and its worker must be a self-contained bundle (no `node_modules` ship with it). For Docker, also copy its `package.json` in the deps stage of the `Dockerfile` so its dependencies install.
+- **Managed git install (this VM).** While packing the server, `scripts/prepare-bundled-package.mjs` builds each listed plugin (`scripts/shipped-plugins.mjs`) and puts a copy inside the server package, at `~/.paperclip/cli/installs/git/<sha12>/node_modules/@paperclipai/server/shipped-plugins/<dir>`. The copy is part of the payload, so `paperclipai update` brings the new plugin code and `paperclipai update --rollback` brings the previous payload's copy back. Exception: rolling back to a version from before plugins shipped this way leaves the plugin running from the newer copy (that older server does not re-point it); it keeps working while that newer payload is still kept, and the next update fixes it. npm releases (`scripts/release.sh`) skip this step, so a published server package never carries these plugins. No CLI change was needed, so the first update after this landed already works with the CLI that was on the VM.
+- **Docker and dev.** The Docker build runs `node scripts/shipped-plugins.mjs build`; the server uses the plugin in place at `/app/<dir>`. In a dev checkout it is used in place too, once built (`pnpm --filter <name> build`); an unbuilt plugin is skipped with a log line, never auto-built.
+- **At every server start** (`server/src/services/shipped-plugins.ts`, before plugins are loaded): each listed plugin is installed if missing; an existing install of the same plugin key, including one made by hand in the plugin manager, is adopted (same row, config and data kept) and pointed at the copy that ships with the running server, with its stored manifest refreshed. Its worker then starts from that copy and its new migrations run. Plugins not on the list are never touched.
+- **Trust.** Shipped plugins are trusted like the server code: their declared capabilities are approved on install and on upgrade, so they never stop in `upgrade_pending`. Review capability changes in the pull request instead.
+- **Switching one off.** Disable it in the plugin manager; that is kept across restarts. Uninstalling does not stick (it is reinstalled at the next start); an uninstall that also removes the plugin's data comes back empty, losing its settings and data. To stop shipping it, remove it from the list.
+- **Plugin migrations are forward-only.** A rollback runs the older plugin code against the newer plugin schema; a plugin change that needs a schema change must stay readable by the previous plugin version, or you restore the database backup.
+- **Check after an update:** `paperclipai service logs -n 300 | grep "shipped plugin"` shows one line per plugin (`installed`, `rebound`, `updated`, `unchanged`, `skipped` or `failed`), and the plugin manager shows it ready.
 
 ## 10. Troubleshooting
 
@@ -221,6 +242,7 @@ Each update needs `GH_TOKEN` set in that session (same as step 5.2) while the re
 | `error: linker 'cc' not found` | `sudo apt-get install -y build-essential`. |
 | Download or `cargo` fetch times out | Outbound access blocked; recheck step 4.4. |
 | `pnpm install --frozen-lockfile` fails | `pnpm-lock.yaml` is stale or missing in the commit. Run `pnpm install` locally, commit the lockfile, push, use the new SHA. |
+| Log shows `Failed to reconcile shipped plugin` or a shipped plugin is missing | The server still starts; the plugin is unavailable. The log line has the reason. `skipped ... not built` in Docker or dev means the plugin was not built; on the VM, check the payload has `node_modules/@paperclipai/server/shipped-plugins/`. See "How in-repo plugins ship" in section 9. |
 | Service fails to start after install | `paperclipai service logs -n 200`, then `paperclipai update --rollback`. |
 | `https://<ip>` loads but shows the old UI | Browser cache, or the service was not restarted. Hard-refresh; run `paperclipai service restart`. |
 | Agent environment test: `resolves outside the selected provider root` | The commit lacks the ACPX fix in `installation-integrity.ts`. Deploy a commit that has it. |

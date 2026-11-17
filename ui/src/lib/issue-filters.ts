@@ -38,7 +38,12 @@ export type IssueFilterState = {
   externalObjectStatuses: string[];
   showAgentCreatedTasks: boolean;
   routineTasksOnly?: boolean;
+  /** Fork patch (Chimera): only tasks linked to an Azure DevOps work item. */
+  adoTasksOnly?: boolean;
 };
+
+/** Origin kind of tasks linked to an ADO work item by the Azure DevOps plugin (LINKED_TASK_ORIGIN_KINDS). */
+export const ADO_LINKED_ORIGIN_KIND = "plugin:chimera.plugin-ado:workitem";
 
 export const defaultIssueFilterState: IssueFilterState = {
   statuses: [],
@@ -52,6 +57,7 @@ export const defaultIssueFilterState: IssueFilterState = {
   externalObjectStatuses: [],
   showAgentCreatedTasks: false,
   routineTasksOnly: false,
+  adoTasksOnly: false,
 };
 
 export const externalObjectFilterOrder = [
@@ -121,6 +127,7 @@ export function normalizeIssueFilterState(value: unknown): IssueFilterState {
     externalObjectStatuses: normalizeIssueFilterValueArray(candidate.externalObjectStatuses),
     showAgentCreatedTasks: candidate.showAgentCreatedTasks === true,
     routineTasksOnly: candidate.routineTasksOnly === true,
+    adoTasksOnly: candidate.adoTasksOnly === true,
   };
 }
 
@@ -215,11 +222,14 @@ function issueMatchesExternalObjectStatusFilter(
 
 /** Keep creation visibility and routine origin consistent across collection reads. */
 export function issueCreationRequestFilters(
-  state: Pick<IssueFilterState, "routineTasksOnly" | "showAgentCreatedTasks">,
+  state: Pick<IssueFilterState, "routineTasksOnly" | "showAgentCreatedTasks" | "adoTasksOnly">,
   enableAgentCreatedVisibilityFilter = false,
 ) {
   if (state.routineTasksOnly) {
     return { originKind: "routine_execution", includeRoutineExecutions: true, includeAgentCreatedTasks: true };
+  }
+  if (state.adoTasksOnly) {
+    return { originKind: ADO_LINKED_ORIGIN_KIND, includeRoutineExecutions: true, includeAgentCreatedTasks: true };
   }
   return enableAgentCreatedVisibilityFilter
     ? { includeRoutineExecutions: true, includeAgentCreatedTasks: state.showAgentCreatedTasks }
@@ -241,7 +251,10 @@ export function applyIssueFilters(
   if (state.routineTasksOnly) {
     result = result.filter((issue) => issue.originKind === "routine_execution");
   }
-  if (enableAgentCreatedVisibilityFilter && !state.showAgentCreatedTasks && !state.routineTasksOnly) {
+  if (state.adoTasksOnly) {
+    result = result.filter((issue) => issue.originKind === ADO_LINKED_ORIGIN_KIND);
+  }
+  if (enableAgentCreatedVisibilityFilter && !state.showAgentCreatedTasks && !state.routineTasksOnly && !state.adoTasksOnly) {
     result = result.filter((issue) => !isAgentCreatedIssue(issue));
   }
   if (state.statuses.length > 0) result = result.filter((issue) => state.statuses.includes(issue.displayStatus ?? issue.status));
@@ -304,6 +317,7 @@ export function countActiveIssueFilters(
   if (state.workspaces.length > 0) count += 1;
   if (state.liveOnly) count += 1;
   if (state.routineTasksOnly) count += 1;
+  if (state.adoTasksOnly) count += 1;
   if (state.externalObjectStatuses.length > 0) count += 1;
   if (enableAgentCreatedVisibilityFilter && state.showAgentCreatedTasks) count += 1;
   return count;

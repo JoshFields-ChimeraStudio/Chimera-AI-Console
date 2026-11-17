@@ -28,7 +28,7 @@ import { formatUserLabel } from "@/lib/assignees";
 import { buildCompanyUserProfileMap } from "@/lib/company-members";
 import { coordinatorAttentionTasksQueryKey } from "@/lib/coordinator-attention";
 import { createIssueDetailLocationState } from "@/lib/issueDetailBreadcrumb";
-import { defaultIssueFilterState, type IssueFilterState } from "@/lib/issue-filters";
+import { ADO_LINKED_ORIGIN_KIND, defaultIssueFilterState, type IssueFilterState } from "@/lib/issue-filters";
 import { queryKeys } from "@/lib/queryKeys";
 import { useLocation, useNavigate, useSearchParams } from "@/lib/router";
 import { loadTaskListView, saveTaskListView, taskListViews, taskListViewStorageKey, type TaskListView } from "@/lib/task-list-views";
@@ -88,11 +88,13 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
     return next;
   }, { replace: true });
   const routineTasksOnly = params.get("originKind") === "routine_execution";
-  const originKind = routineTasksOnly ? "routine_execution" : undefined;
+  // Fork patch (Chimera): "Linked to ADO" uses the same originKind URL filter, so the two replace each other.
+  const adoTasksOnly = params.get("originKind") === ADO_LINKED_ORIGIN_KIND;
+  const originKind = routineTasksOnly ? "routine_execution" : adoTasksOnly ? ADO_LINKED_ORIGIN_KIND : undefined;
   const normalizedView = normalizeTaskViewKey(urlView);
   const presetStatuses = normalizedView && taskView(normalizedView).surface === "issues" ? taskView(normalizedView).statuses ?? [] : [];
   const initialStatuses: string[] = params.has("status") ? params.getAll("status") : presetStatuses;
-  const previousUrlFilters = useRef({ assignee: urlAssignee, statuses: urlStatuses, labels: urlLabels, view: urlView, routineTasksOnly });
+  const previousUrlFilters = useRef({ assignee: urlAssignee, statuses: urlStatuses, labels: urlLabels, view: urlView, routineTasksOnly, adoTasksOnly });
   const needsAttention = view === "blocked";
   const query = params.get("q") ?? "";
   const deferredQuery = useDeferredValue(query.trim());
@@ -201,25 +203,30 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
     searchMode: "server",
     liveIssueIds: collectLiveIssueIds(liveRuns.data, records),
     viewStorageKey,
-    initialFilters: { labels: params.getAll("label").filter(Boolean), assignees: params.getAll("assignee"), statuses: initialStatuses, routineTasksOnly },
+    initialFilters: { labels: params.getAll("label").filter(Boolean), assignees: params.getAll("assignee"), statuses: initialStatuses, routineTasksOnly, adoTasksOnly },
   });
   useEffect(() => {
     const previous = previousUrlFilters.current;
-    if (previous.assignee === urlAssignee && previous.view === urlView && previous.statuses === urlStatuses && previous.labels === urlLabels && previous.routineTasksOnly === routineTasksOnly) return;
-    previousUrlFilters.current = { assignee: urlAssignee, statuses: urlStatuses, labels: urlLabels, view: urlView, routineTasksOnly };
+    if (previous.assignee === urlAssignee && previous.view === urlView && previous.statuses === urlStatuses && previous.labels === urlLabels && previous.routineTasksOnly === routineTasksOnly && previous.adoTasksOnly === adoTasksOnly) return;
+    previousUrlFilters.current = { assignee: urlAssignee, statuses: urlStatuses, labels: urlLabels, view: urlView, routineTasksOnly, adoTasksOnly };
     collection.updateFilters({
       ...(previous.labels !== urlLabels ? { labels: params.getAll("label").filter(Boolean) } : {}),
       ...(previous.routineTasksOnly !== routineTasksOnly ? { routineTasksOnly } : {}),
+      ...(previous.adoTasksOnly !== adoTasksOnly ? { adoTasksOnly } : {}),
       ...(previous.assignee !== urlAssignee ? { assignees: params.getAll("assignee") } : {}),
       ...(previous.view !== urlView || previous.statuses !== urlStatuses ? { statuses: initialStatuses } : {}),
     });
-  }, [urlAssignee, urlView, urlStatuses, urlLabels, initialStatuses, routineTasksOnly, collection.updateFilters]);
+  }, [urlAssignee, urlView, urlStatuses, urlLabels, initialStatuses, routineTasksOnly, adoTasksOnly, collection.updateFilters]);
   const updateFilters = (patch: Partial<IssueFilterState>) => {
     collection.updateFilters(patch);
-    if (patch.assignees === undefined && patch.statuses === undefined && patch.labels === undefined && patch.routineTasksOnly === undefined) return;
+    if (patch.assignees === undefined && patch.statuses === undefined && patch.labels === undefined && patch.routineTasksOnly === undefined && patch.adoTasksOnly === undefined) return;
     const next = new URLSearchParams(params);
     if (patch.routineTasksOnly !== undefined) {
       if (patch.routineTasksOnly) next.set("originKind", "routine_execution");
+      else next.delete("originKind");
+    }
+    if (patch.adoTasksOnly !== undefined) {
+      if (patch.adoTasksOnly) next.set("originKind", ADO_LINKED_ORIGIN_KIND);
       else next.delete("originKind");
     }
     if (patch.labels !== undefined) {
@@ -283,7 +290,7 @@ export function CoordinatorTasks({ viewControl }: { viewControl?: ReactNode } = 
     <TaskListToolbar view={view} onViewChange={setView} viewControl={viewControl}
       query={collection.query} onQueryChange={collection.setQuery} layout={collection.layout} onLayoutChange={collection.setLayout}
       allExpanded={collection.allExpanded} onToggleExpanded={collection.toggleExpanded} onNewTask={() => openNewIssue()}
-      filters={{ enableRoutineTasksFilter: true, state: collection.filters, onChange: updateFilters, activeFilterCount: collection.activeFilterCount,
+      filters={{ enableRoutineTasksFilter: true, enableAdoTasksFilter: true, state: collection.filters, onChange: updateFilters, activeFilterCount: collection.activeFilterCount,
         agents: agents.data ?? [], projects: projects.data ?? [], labels: labels.data ?? [], currentUserId: userId, creators: collection.creators }} />
     {error ? <div role="alert" className="flex items-center gap-2 text-sm text-destructive"><span>{error instanceof Error ? error.message : "Could not load tasks"}</span><Button variant="outline" size="sm" onClick={retry}>Retry</Button></div> : null}
     {rowDetailsError ? <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground"><span>Task details couldn’t load.</span><Button variant="ghost" size="sm" onClick={() => void retryRowDetails()}>Retry</Button></div> : null}

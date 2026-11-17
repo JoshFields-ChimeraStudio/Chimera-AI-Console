@@ -36,6 +36,7 @@ describe.skipIf(!support.supported)("task search relevance rubric (real PostgreS
       await db.insert(issues).values({ id, companyId, title: entry.title,
         identifier: "identifier" in entry ? entry.identifier : `EVAL-${index + 1}`,
         description: "description" in entry ? entry.description : null,
+        ...("originKind" in entry ? { originKind: entry.originKind, originId: entry.originId } : {}),
         status: "status" in entry ? entry.status : "todo", updatedAt, createdAt: updatedAt });
       if ("comments" in entry) {
         for (const body of entry.comments) await db.insert(issueComments).values({ companyId, issueId: id, body, updatedAt });
