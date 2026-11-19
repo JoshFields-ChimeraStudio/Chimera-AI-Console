@@ -15,6 +15,7 @@ import {
   relatedRefs,
   type AssignResult,
   type BacklogData,
+  type NeedsJoshData,
   type WorkItemData,
 } from "../src/backlog/index.js";
 import { ensureSafeMarkdown, findUnsafeMarkdown, htmlToMarkdown, sanitizeMarkdown, textToMarkdown } from "../src/backlog/markdown.js";
@@ -462,6 +463,31 @@ describe("backlog data", () => {
     });
     // Closed and removed items are included; the UI filters them.
     expect(data.items[2]).toMatchObject({ id: 22, stateCategory: "Removed", linkedTask: null });
+  });
+
+  it("lists the items waiting for Josh, oldest first, with what he is asked to do", async () => {
+    const s = setup();
+    const task = issue({ identifier: "CHI-12", status: "in_review", assigneeAgentId: AGENT.id, originKind: ADO_LINK_ORIGIN_KIND as never, originId: "ChimeraStudioSoftware/AI Testing/33" });
+    s.harness.seed({ issues: [task] });
+    await start(s);
+    s.ado.add({ id: 30, type: "Epic", state: "Plan Review" });
+    s.ado.add({ id: 31, type: "Feature", state: "Ready For Approval" });
+    s.ado.add({ id: 32, type: "Feature", state: "Refining" });
+    s.ado.add({ id: 33, type: "User Story", state: "Ready To Merge" });
+    s.ado.add({ id: 34, type: "Task", state: "Blocked" });
+    s.ado.add({ id: 35, type: "Document", state: "In Review" });
+    s.ado.add({ id: 36, type: "User Story", state: "In Review" });
+    for (const id of [30, 31, 32, 33, 34, 35, 36]) await deliver(s, id);
+    const data = await s.harness.getData<NeedsJoshData>(BACKLOG_DATA_KEYS.needsJosh, { companyId: CO });
+    expect(data.configured).toBe(true);
+    expect(data.items.map((i) => [i.id, i.action])).toEqual([
+      [30, "Approve the plan: set the Epic In Progress"],
+      [31, "Approve the breakdown: set the Feature Ready For Work"],
+      [33, "Review and merge the pull request"],
+      [34, "Answer the question"],
+      [35, "Review the document's pull request"],
+    ]);
+    expect(data.items[2]).toMatchObject({ type: "User Story", url: `${BASE}/_workitems/edit/33`, linkedTask: { identifier: "CHI-12" }, since: "2026-11-01T00:00:33.000Z" });
   });
 
   it("reports configured: false without settings", async () => {

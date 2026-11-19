@@ -62,6 +62,20 @@ Roles, tool rights per role, and the workflow rules the tools enforce (who assig
 - **State rules (A4):** enforced by `ado_update_state` (and the assignment and creation rules by their tools), from `src/workflow/`; see `doc/plans/2026-11-17-agent-workflow.md`. Automatic roll-ups and the Paperclip-to-ADO state sync of A4 are still open.
 - **Setup:** none in the host: tools of shipped plugins are allowed for agents by default ("Agent tool access" under "How in-repo plugins ship" in `doc/DEPLOYMENT-STEPS.md`), so the `agentRoles` setting decides what each agent may do.
 
+## D4: what waits for Josh
+
+A global toolbar button from the plugin ("ADO · N need you", `AdoNeedsJosh` in `src/ui/index.tsx`) lists the work items waiting for Josh, oldest first, each with what he is asked to do and links to the Backlog page and to ADO. The list is the plugin's `needs-josh` data, read from the work item cache (no ADO calls), using `JOSH_WAITS` in `src/workflow/rules.ts`:
+
+| Type | State | Josh is asked to |
+|---|---|---|
+| Epic | Plan Review | approve the plan (set the Epic In Progress) |
+| Feature | Ready For Approval | approve the breakdown (set the Feature Ready For Work) |
+| User Story, Bug | Ready To Merge | review and merge the pull request |
+| Document | In Review | review the document's pull request |
+| any type | Blocked | answer the question |
+
+The button refreshes every 30 seconds. With Josh's permission (a button in the list), the browser shows a Windows notification for each new wait while any Paperclip tab is open; clicking it opens the item's Backlog page. What has been seen is kept per browser (localStorage), so the first load and reloads do not notify again. Notifications with every tab closed would need a service worker and web push, which is not built. Waits from Paperclip itself (approvals, failed runs, budget stops) are the rest of D4.
+
 ## Constraints found that affect later items
 
 - **Task UI (A2, built):** the chip ("ADO #123 · Active", linking to the item) and the link/unlink control are a `toolbarButton` slot on the task (capability `ui.action.register`). Core changes, not a plugin list page, give one task list: a "Linked to ADO" filter (exact `originKind`, the same URL parameter as the routine filter) and search by ADO ID through `origin_id` (only for linked-task origins, case-insensitive). Links are refreshed by events and catch-up (newer revisions only); A2 never creates tasks. A 404 from ADO marks the link "not found in ADO" rather than deleting it; it clears when the item is seen again. The chip is not shown in task list rows. After link or unlink the core task header is not refreshed by the plugin: the plugin UI SDK has no bridge to invalidate host data (the header does not show the origin, so nothing visible is stale).

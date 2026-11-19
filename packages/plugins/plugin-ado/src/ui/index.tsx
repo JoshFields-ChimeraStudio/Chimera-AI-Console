@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePluginAction, usePluginData, type PluginWidgetProps } from "@paperclipai/plugin-sdk/ui";
 import type { AdoStatus } from "../worker.js";
 import type { IssueLinkData } from "../links/index.js";
+import type { NeedsJoshData, NeedsJoshItem } from "../backlog/index.js";
 
 // Keys match LINK_DATA_KEYS / LINK_ACTION_KEYS in ../links/index.ts (not imported, to keep worker code out of the UI bundle).
 const LINK_DATA_KEY = "issue-link";
@@ -161,6 +162,153 @@ export function AdoTaskLink({ context }: PluginWidgetProps) {
         </button>
       )}
       {message ? <span role="alert">{message}</span> : null}
+    </span>
+  );
+}
+
+// Key matches BACKLOG_DATA_KEYS.needsJosh in ../backlog/index.ts.
+const NEEDS_JOSH_DATA_KEY = "needs-josh";
+const NEEDS_JOSH_REFRESH_MS = 30_000;
+
+/** An item waits for Josh in a given state; a new state is a new wait. */
+const waitKey = (item: Pick<NeedsJoshItem, "id" | "state">) => `${item.id}:${item.state}`;
+
+function readSeen(storageKey: string): Set<string> | null {
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    return raw ? new Set(JSON.parse(raw) as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSeen(storageKey: string, keys: Iterable<string>) {
+  try {
+    window.localStorage.setItem(storageKey, JSON.stringify([...keys]));
+  } catch {
+    // Storage can be unavailable (private mode); notifications then repeat after a reload.
+  }
+}
+
+function notificationsSupported(): boolean {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+/**
+ * Global toolbar: "ADO · N need you", the ADO items waiting for Josh (D4), with
+ * a Windows notification (through the browser) when a new one appears while a
+ * Paperclip tab is open.
+ */
+export function AdoNeedsJosh({ context }: PluginWidgetProps) {
+  const companyId = context.companyId;
+  const { data, error, refresh } = usePluginData<NeedsJoshData>(NEEDS_JOSH_DATA_KEY, { companyId });
+  const [open, setOpen] = useState(false);
+  const [permission, setPermission] = useState<string>(() => (notificationsSupported() ? Notification.permission : "unsupported"));
+  const firstLoad = useRef(true);
+
+  useEffect(() => {
+    if (!companyId) return;
+    const timer = setInterval(() => refresh(), NEEDS_JOSH_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [companyId, refresh]);
+
+  // Notify about waits not seen before. The first load only records what is already waiting.
+  useEffect(() => {
+    if (!companyId || !data?.items) return;
+    const storageKey = `chimera.plugin-ado:needs-josh-seen:${companyId}`;
+    const seen = readSeen(storageKey);
+    const current = data.items.map(waitKey);
+    const fresh = seen ? data.items.filter((i) => !seen.has(waitKey(i))) : [];
+    writeSeen(storageKey, current);
+    const wasFirst = firstLoad.current;
+    firstLoad.current = false;
+    if (wasFirst && !seen) return;
+    if (!fresh.length || !notificationsSupported() || Notification.permission !== "granted") return;
+    for (const item of fresh.slice(0, 3)) {
+      const n = new Notification(`ADO: ${item.action}`, { body: `${item.type} #${item.id} ${item.title}`, tag: `ado-${waitKey(item)}` });
+      n.onclick = () => {
+        window.focus();
+        if (context.companyPrefix) window.location.assign(`/${context.companyPrefix}/backlog/${item.id}`);
+        n.close();
+      };
+    }
+    if (fresh.length > 3) new Notification("ADO", { body: `${fresh.length - 3} more items need you.`, tag: "ado-more" });
+  }, [companyId, data, context.companyPrefix]);
+
+  if (!companyId || error || !data?.configured) return null;
+  const items = data.items;
+
+  async function enableNotifications() {
+    if (!notificationsSupported()) return;
+    setPermission(await Notification.requestPermission());
+  }
+
+  const count = items.length;
+  return (
+    <span style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        title={count ? `${count} Azure DevOps item${count === 1 ? "" : "s"} waiting for you` : "Nothing in Azure DevOps is waiting for you"}
+        style={{ fontSize: "0.8rem", padding: "0.15rem 0.5rem", fontWeight: count ? 600 : 400 }}
+      >
+        ADO · {count ? `${count} need${count === 1 ? "s" : ""} you` : "nothing waiting"}
+      </button>
+      {open ? (
+        <div
+          role="dialog"
+          aria-label="Azure DevOps items waiting for you"
+          style={{
+            position: "absolute",
+            right: 0,
+            top: "calc(100% + 4px)",
+            zIndex: 50,
+            width: "24rem",
+            maxHeight: "28rem",
+            overflowY: "auto",
+            padding: "0.5rem",
+            borderRadius: "0.5rem",
+            border: "1px solid var(--border, #ccc)",
+            background: "var(--popover, var(--background, #fff))",
+            color: "var(--popover-foreground, inherit)",
+            boxShadow: "0 8px 24px rgba(0,0,0,0.18)",
+            fontSize: "0.8rem",
+            display: "grid",
+            gap: "0.5rem",
+          }}
+        >
+          {count === 0 ? <div>Nothing in Azure DevOps is waiting for you.</div> : null}
+          {items.map((item) => (
+            <div key={waitKey(item)} style={{ display: "grid", gap: "0.15rem" }}>
+              <div style={{ fontWeight: 600 }}>{item.action}</div>
+              <div>
+                {item.type} #{item.id} {item.title}
+              </div>
+              <div style={{ display: "flex", gap: "0.75rem", opacity: 0.8 }}>
+                <span>{item.since ? `since ${new Date(item.since).toLocaleString()}` : item.state}</span>
+                {context.companyPrefix ? <a href={`/${context.companyPrefix}/backlog/${item.id}`}>Backlog</a> : null}
+                <a href={item.url} target="_blank" rel="noreferrer">
+                  Open in ADO
+                </a>
+              </div>
+            </div>
+          ))}
+          <div style={{ borderTop: "1px solid var(--border, #ccc)", paddingTop: "0.4rem" }}>
+            {permission === "granted" ? (
+              <span>Windows notifications are on while a Paperclip tab is open.</span>
+            ) : permission === "denied" ? (
+              <span>Windows notifications are blocked for this site in the browser's settings.</span>
+            ) : permission === "unsupported" ? (
+              <span>This browser cannot show notifications.</span>
+            ) : (
+              <button type="button" onClick={() => void enableNotifications()}>
+                Turn on Windows notifications
+              </button>
+            )}
+          </div>
+        </div>
+      ) : null}
     </span>
   );
 }

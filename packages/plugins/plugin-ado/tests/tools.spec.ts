@@ -332,7 +332,12 @@ describe("roles", () => {
     for (const role of ["architect", "reviewer", "readonly"] as const) expect(ROLE_POLICIES[role].tools).not.toContain(TOOL_NAMES.createWorkItem);
     for (const role of ["director", "planner", "architect", "builder", "reviewer"] as const) expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.assign);
     expect(ROLE_POLICIES.reviewer.tools).not.toContain(TOOL_NAMES.linkPullRequest);
-    expect(ROLE_POLICIES.architect.tools).toEqual(ROLE_POLICIES.builder.tools.filter((t) => t !== TOOL_NAMES.createWorkItem));
+    expect(ROLE_POLICIES.architect.tools).toEqual([...ROLE_POLICIES.builder.tools.filter((t) => t !== TOOL_NAMES.createWorkItem), TOOL_NAMES.setTechnicalNotes]);
+    // Authors write Documents as pull requests: no work items, no technical notes.
+    expect(ROLE_POLICIES.author.tools).toContain(TOOL_NAMES.createPullRequest);
+    for (const t of [TOOL_NAMES.createWorkItem, TOOL_NAMES.setTechnicalNotes]) expect(ROLE_POLICIES.author.tools).not.toContain(t);
+    for (const role of ["director", "planner", "architect"] as const) expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.setTechnicalNotes);
+    for (const role of ["builder", "reviewer", "qa", "readonly"] as const) expect(ROLE_POLICIES[role].tools).not.toContain(TOOL_NAMES.setTechnicalNotes);
   });
 
   it("maps the director and architect roles", async () => {
@@ -428,6 +433,21 @@ describe("pull request tools", () => {
   });
 });
 
+describe("technical notes", () => {
+  it("writes the field on a planning type, signed in the history, and refuses other types and other roles", async () => {
+    const s = setup();
+    const res = await s.call(TOOL_NAMES.setTechnicalNotes, { workItemId: 42, notes: "Use the cache.\nNo new tables." }, "arch");
+    expect(res.error).toBeUndefined();
+    expect(s.ado.items.get(42)!.fields["Custom.TechnicalNotes"]).toBe("Use the cache.<br>No new tables.");
+    expect(s.ado.items.get(42)!.fields["System.History"]).toBe("[Arch] Updated the technical notes.");
+    s.ado.add(70, "Review", "New", 42);
+    expect((await s.call(TOOL_NAMES.setTechnicalNotes, { workItemId: 70, notes: "x" }, "arch")).error).toBe(
+      "Nothing was changed: a Review has no technical notes; they go on an Epic, Feature, User Story, Bug or Task.",
+    );
+    expect((await s.call(TOOL_NAMES.setTechnicalNotes, { workItemId: 42, notes: "x" }, "ryujin")).error).toMatch(/^Permission denied: Ryujin has the ADO role "builder"/);
+  });
+});
+
 describe("html", () => {
   it("escapes agent text, keeps line breaks and prefixes the agent name", () => {
     expect(textToHtml('<script>alert("x")</script>\r\nnext & last')).toBe("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;<br>next &amp; last");
@@ -446,7 +466,7 @@ describe("manifest", () => {
       expect(manifest.capabilities).toContain(cap);
     }
     const roles = (manifest.instanceConfigSchema as any).properties.agentRoles;
-    expect(roles.items.properties.role.enum).toEqual(["director", "planner", "architect", "builder", "reviewer", "qa", "readonly"]);
+    expect(roles.items.properties.role.enum).toEqual(["director", "planner", "architect", "author", "builder", "reviewer", "qa", "readonly"]);
     expect(manifest.capabilities).toContain("issue.comments.create");
   });
 

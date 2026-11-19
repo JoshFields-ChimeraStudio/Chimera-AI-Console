@@ -18,8 +18,9 @@ The plugin's **Agent roles** setting. The full set (`qa` added November 2026 wit
 |---|---|---|
 | `director` | Tiamat | Intake, Epic and Documentation, assigning approved work, Feature and Epic roll-up |
 | `planner` | Orochi | The plan and the work item tree: Features, Stories, Tasks, Reviews and QA Tests |
-| `architect` | Ryujin | Technical notes, Ready For Approval, architecture Documents and Reviews |
-| `builder` | Engineers, analysts, document authors (Zhulong, Fafnir, Ouroboros, Jormungandr, …) | Their own Stories, Bugs, Documents, Tasks and Defects |
+| `architect` | Ryujin, Fafnir | Technical notes (`ado_update_technical_notes`), Ready For Approval, architecture Documents and Reviews |
+| `author` | Zhulong, Fucanglong, Kukulkan | Their own Documents (product analysis, technical design documents, designs), each as a pull request; may claim only Documents and create nothing (added 19 November 2026) |
+| `builder` | Engineers (Hydra, Yinglong, Ouroboros, Jormungandr, …) | Their own Stories, Bugs, Documents, Tasks and Defects |
 | `reviewer` | Ladon and the other gate agents | Their own Reviews |
 | `qa` | QA testers | Their own QA Tests, and the Defects they find |
 | `readonly` | Anyone not listed | Read only |
@@ -28,12 +29,13 @@ Some state rights are "the item's **assignee**": the agent whose linked Papercli
 
 Tool rights per role (`src/tools/roles.ts`; the A8 section of `doc/plans/2026-11-14-ado-integration.md` points here). What a role then does with a tool is limited by the rules in the sections below.
 
-| Tool | readonly | reviewer, qa | builder, architect | director, planner |
-|---|---|---|---|---|
-| `ado_get_work_item`, `ado_get_workflow`, `ado_get_pr_threads` | yes | yes | yes | yes |
-| `ado_post_comment`, `ado_update_state`, `ado_update_assignment`, `ado_post_pr_comment` | | yes | yes | yes |
-| `ado_create_pr_link`, `ado_create_pull_request` | | | yes | yes |
-| `ado_create_work_item` | | qa only | builder only | yes |
+| Tool | readonly | reviewer, qa | author, builder | architect | director, planner |
+|---|---|---|---|---|---|
+| `ado_get_work_item`, `ado_get_workflow`, `ado_get_pr_threads` | yes | yes | yes | yes | yes |
+| `ado_post_comment`, `ado_update_state`, `ado_update_assignment`, `ado_post_pr_comment` | | yes | yes | yes | yes |
+| `ado_create_pr_link`, `ado_create_pull_request` | | | yes | yes | yes |
+| `ado_update_technical_notes` | | | | yes | yes |
+| `ado_create_work_item` | | qa only | builder only | | yes |
 
 The create tool goes to the roles the creation table below names, so an architect has none.
 
@@ -66,8 +68,8 @@ Who may create which type:
 | Type | May create | Parent |
 |---|---|---|
 | Epic | director, planner | none |
-| Documentation | director | Epic |
-| Document | director | Documentation |
+| Documentation | director, planner | Epic |
+| Document | director, planner | Documentation |
 | Feature | planner | Epic |
 | User Story | planner | Feature |
 | Bug | planner (Josh in ADO) | none |
@@ -84,7 +86,9 @@ Redesigned November 2026, after the #820 and #823 tests stalled (a reviewer movi
 - **One owner per item.** Only an item's owner (the agent on its linked task) moves it. Others signal through their own items: the reviewer through its Review, QA through its QA Test and the Defects it files.
 - **Children report to their parent's owner.** Every state change of a work item by anyone other than the owner of its parent wakes that owner (`src/watch/`, reason `ado_child_changed`). A Review approved wakes the builder; a Story completed wakes the Feature's owner; a Feature completed wakes the Epic's owner.
 - **Handing over is a state.** The builder sets its Story's Review to `Ready For Review` and its QA Test to `Ready For Test`, and fixes a Defect to `Ready For Retest`. Each wakes that item's assignee, because someone else changed their item.
-- **Roll-ups are the plugin's (A4, 19 November 2026).** A Feature, Epic or Documentation item that is In Progress is set Completed by the plugin once every item under it is Completed or Removed (at least one Completed), signed `[ADO plugin]` in its history (`ROLLUP_RULES` in `src/workflow/rules.ts`, done in `src/watch/`). Their owners are not woken for their children's ordinary moves, only when a child is Blocked; this saves a planner or director run per Story move.
+- **The planner may run the Documentation step** (create Documentation and Documents, set Epic Documenting and the Documentation's states) so a team without a director, like the test team, can do it; on the real team Tiamat does.
+- **Technical notes** are written with `ado_update_technical_notes` (Custom.TechnicalNotes, on Epic, Feature, User Story, Bug and Task). The planner sets the Feature to Technical Notes and hands it to the architect, who writes the notes, sets Ready For Approval and hands the Feature back.
+- **Roll-ups are the plugin's (A4, 19 November 2026).** A Feature, Epic or Documentation item that is In Progress is set Completed by the plugin once every item under it is Completed or Removed (at least one Completed), signed `[ADO plugin]` in its history (`ROLLUP_RULES` in `src/workflow/rules.ts`, done in `src/watch/`). While the parent is In Progress its owner is not woken for its children's ordinary moves, only when a child is Blocked; this saves a planner or director run per Story move. Before that (an Epic still Documenting) the owner is told as usual, so it learns its Documentation is done.
 - **Nothing closes early.** Reviews (`Approved`) and QA Tests (`Passed`) stay open until their Story or Bug is `Completed`, so a Defect fix can hand them over again. Setting the Story `Completed` closes them, in the same tool call.
 - **One pull request per Story or Bug,** plus one per Defect fix, linked to the Defect and its Story. A Document's markdown goes in a pull request in the documents repository; Josh's merge is his approval.
 
@@ -94,16 +98,16 @@ Josh set these states in ADO on 18 November 2026; they were checked live against
 
 | Type | State | Who may set it |
 |---|---|---|
-| Epic | Documenting | director |
+| Epic | Documenting | director, planner |
 | Epic | Planning | director, planner |
 | Epic | Plan Review | planner (the plan waits for Josh) |
 | Epic | In Progress | Josh (his approval of the plan; wakes the planner, who builds the tree) |
 | Epic | Completed, Blocked | director, planner (Completed when every Feature is) |
 | Epic | Removed | Josh |
-| Documentation | In Progress, Blocked, Completed | director (Completed when every Document is) |
+| Documentation | In Progress, Blocked, Completed | director, planner (the plugin sets Completed when every Document is final) |
 | Document | In Progress, In Review, Blocked, Completed | assignee (In Review while its pull request waits for Josh; Completed when he merges it) |
 | Document | Changes Requested | Josh |
-| Document | Removed | director |
+| Document | Removed | director, planner |
 | Feature | Refining, Technical Notes | planner |
 | Feature | Ready For Approval | architect, planner (the breakdown waits for Josh) |
 | Feature | Ready For Work | Josh (his approval of the breakdown; wakes the Feature's owner, who assigns the work) |

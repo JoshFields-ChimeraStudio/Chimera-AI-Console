@@ -139,6 +139,20 @@ describe("roll-ups (A4)", () => {
   });
 });
 
+describe("roll-ups before the parent is In Progress", () => {
+  it("tells an Epic's owner, while it is still Documenting, that its Documentation finished", async () => {
+    const s = setup();
+    s.items[950] = workItem(950, { "System.WorkItemType": "Epic", "System.State": "Documenting" }, [951]);
+    s.items[951] = workItem(951, { "System.WorkItemType": "Documentation", "System.State": "Completed" });
+    s.tasks[950] = { id: "task-rowan-epic", status: "in_review", assigneeAgentId: "rowan" };
+    s.tasks[951] = { id: "task-rowan-docs", status: "in_review", assigneeAgentId: "rowan" };
+    s.setUpdates([upd(3, SVC, { ...stateChange("In Progress", "Completed"), ...tagged("ADO plugin") })]);
+    const out = await s.change(summary(951, "Completed", 3, { type: "Documentation", parentId: 950 }));
+    expect(out.notified).toContain("task-rowan-epic");
+    expect(out.rolledUp).toBeUndefined();
+  });
+});
+
 describe("who changed a work item", () => {
   it("names the agent from its tag, carried over revisions that do not touch the tags", () => {
     const lines = changesSince(

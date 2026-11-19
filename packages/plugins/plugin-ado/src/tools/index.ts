@@ -694,6 +694,26 @@ export function registerAgentTools(
       };
     },
 
+    async [TOOL_NAMES.setTechnicalNotes](caller, params, ado) {
+      const notes = requiredText(params.notes, "notes").trim();
+      const id = await resolveWorkItemId(caller.run, params.workItemId);
+      const item = await withNotFound(ado.getWorkItem(id), `Work item #${id} was not found in ADO.`);
+      const type = String(item.fields["System.WorkItemType"] ?? "");
+      if (!TECHNICAL_NOTES_TYPES.has(type.trim().toLowerCase())) {
+        throw new ToolFailure(`Nothing was changed: a ${type} has no technical notes; they go on an Epic, Feature, User Story, Bug or Task.`);
+      }
+      const state = String(item.fields["System.State"] ?? "");
+      if (FINAL_STATES.some((f) => f.toLowerCase() === state.toLowerCase())) throw new ToolFailure(`Nothing was changed: #${id} is ${state}.`);
+      const updated = await ado.updateWorkItem(id, [
+        { op: "test", path: "/rev", value: item.rev },
+        { op: "add", path: "/fields/Custom.TechnicalNotes", value: textToHtml(notes) },
+        { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, "Updated the technical notes.") },
+        { op: "add", path: "/fields/System.Tags", value: withAgentTag(item.fields["System.Tags"], caller.agentName) },
+      ]);
+      await audit(caller, "technical_notes_updated", id, `updated the technical notes of ADO #${id}`, { rev: updated.rev });
+      return { content: `Technical notes of ${type} #${id} updated.`, data: { workItemId: id, rev: updated.rev, changed: true } };
+    },
+
     async [TOOL_NAMES.getWorkflow](caller) {
       const tools = Object.fromEntries(Object.entries(ROLE_POLICIES).map(([role, p]) => [role, [...p.tools]]));
       const data = { you: { agent: caller.agentName, role: caller.role }, ...workflowData(), tools };
@@ -795,6 +815,9 @@ function assignedMeta(target: Agent, result: AssignDetails): Record<string, unkn
     ...(result.created ? { parentIssueId: result.parentIssueId, projectId: result.projectId } : {}),
   };
 }
+
+/** Types that have Custom.TechnicalNotes in the Chimera process. */
+const TECHNICAL_NOTES_TYPES = new Set(["epic", "feature", "user story", "bug", "task"]);
 
 /** Types of the Agile process that have Microsoft.VSTS.Common.AcceptanceCriteria. */
 const ACCEPTANCE_CRITERIA_TYPES = new Set(["epic", "feature", "user story"]);

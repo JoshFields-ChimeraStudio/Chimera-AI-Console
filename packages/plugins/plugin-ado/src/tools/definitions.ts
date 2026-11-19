@@ -15,6 +15,7 @@ export const TOOL_NAMES = {
   createPullRequest: "ado_create_pull_request",
   getPullRequestThreads: "ado_get_pr_threads",
   postPullRequestComment: "ado_post_pr_comment",
+  setTechnicalNotes: "ado_update_technical_notes",
   getWorkflow: "ado_get_workflow",
 } as const;
 
@@ -239,6 +240,22 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
         },
       },
       required: ["pullRequestId", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_NAMES.setTechnicalNotes,
+    displayName: "ADO: set technical notes",
+    description:
+      "Write the Technical Notes field of an Epic, Feature, User Story, Bug or Task: how it should be built (approach, files and components, data, risks). " +
+      "Replaces the field; read the current notes with ado_get_work_item first and include what should stay. Write plain text or markdown-like plain text; line breaks are kept.",
+    parametersSchema: {
+      type: "object",
+      properties: {
+        workItemId,
+        notes: { type: "string", minLength: 1, maxLength: 30000, description: "The technical notes, as plain text." },
+      },
+      required: ["notes"],
       additionalProperties: false,
     },
   },

@@ -19,12 +19,13 @@ import { BacklogError } from "./errors.js";
 import { htmlToMarkdown, textToMarkdown } from "./markdown.js";
 import { sqlWorkItemCacheRepository, type CachedWorkItem, type ProjectKey, type StateCategory, type WorkItemCacheRepository } from "./repository.js";
 import { createWorkItemTypeCache } from "./work-item-types.js";
+import { joshWaitFor } from "../workflow/rules.js";
 
 export { BacklogError } from "./errors.js";
 export { FIELD, buildTaskDescription } from "./description.js";
 export type { AssignResult, AssignDetails, Assigner } from "./assign.js";
 
-export const BACKLOG_DATA_KEYS = { backlog: "backlog", workItem: "work-item" } as const;
+export const BACKLOG_DATA_KEYS = { backlog: "backlog", workItem: "work-item", needsJosh: "needs-josh" } as const;
 export const BACKLOG_ACTION_KEYS = { sync: "sync-backlog", assign: "assign-agent" } as const;
 
 /** The comments API returns at most 200 per call; the page shows the newest 200. */
@@ -57,6 +58,25 @@ export interface BacklogItem {
   stackRank: number | null;
   url: string;
   linkedTask: LinkedTaskSummary | null;
+}
+
+/** A work item waiting for Josh (D4), for the toolbar's "Needs you" list. */
+export interface NeedsJoshItem {
+  id: number;
+  type: string;
+  title: string;
+  state: string;
+  /** What Josh is asked to do. */
+  action: string;
+  url: string;
+  /** When ADO last changed the item (roughly when it started waiting), if known. */
+  since: string | null;
+  linkedTask: LinkedTaskSummary | null;
+}
+
+export interface NeedsJoshData {
+  configured: boolean;
+  items: NeedsJoshItem[];
 }
 
 export interface BacklogData {
@@ -293,6 +313,21 @@ export function registerBacklogFeatures(deps: PluginDeps, links: LinkFeatures, o
     return { configured: true, syncing: status.syncing, lastSync, items };
   }
 
+  async function needsJosh(companyId: string): Promise<NeedsJoshData> {
+    const key = await projectKey(companyId);
+    if (!key) return { configured: false, items: [] };
+    const [rows, tasks] = await Promise.all([repo.list(companyId, key), links.listLinkedTasks(companyId)]);
+    const items: NeedsJoshItem[] = [];
+    for (const r of rows) {
+      const action = joshWaitFor(r.type, r.state);
+      if (!action) continue;
+      items.push({ id: r.id, type: r.type, title: r.title, state: r.state, action, url: r.url, since: r.changedDate, linkedTask: linkedTaskSummary(tasks.get(r.id)) });
+    }
+    // Oldest first: the longest wait is at the top.
+    items.sort((a, b) => (a.since ?? "").localeCompare(b.since ?? "") || a.id - b.id);
+    return { configured: true, items };
+  }
+
   async function resolvePullRequests(ado: AdoClient, item: AdoWorkItem): Promise<WorkItemPullRequest[]> {
     return Promise.all(
       pullRequestRefs(item).map(async (ref) => {
@@ -388,6 +423,7 @@ export function registerBacklogFeatures(deps: PluginDeps, links: LinkFeatures, o
   }
 
   ctx.data.register(BACKLOG_DATA_KEYS.backlog, async (params) => backlog(companyIdFrom(params)));
+  ctx.data.register(BACKLOG_DATA_KEYS.needsJosh, async (params) => needsJosh(companyIdFrom(params)));
 
   ctx.data.register(BACKLOG_DATA_KEYS.workItem, async (params) => {
     const companyId = companyIdFrom(params);

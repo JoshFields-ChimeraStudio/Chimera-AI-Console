@@ -124,6 +124,12 @@ const manifest: PaperclipPluginManifestV1 = {
         exportName: "AdoStatusWidget",
       },
       {
+        type: "globalToolbarButton",
+        id: "ado-needs-josh",
+        displayName: "Azure DevOps: needs you",
+        exportName: "AdoNeedsJosh",
+      },
+      {
         type: "toolbarButton",
         id: "ado-task-link",
         displayName: "Azure DevOps link",

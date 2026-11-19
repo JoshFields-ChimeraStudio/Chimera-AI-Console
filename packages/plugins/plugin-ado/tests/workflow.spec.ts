@@ -203,10 +203,11 @@ describe("workflow rules", () => {
       }
     });
 
-    it("Removed: the planner for Stories, Bugs and their children, the director for Documents", () => {
+    it("Removed: the planner for Stories, Bugs and their children, the director or planner for Documents", () => {
       expect(decideStateChange({ role: "planner", isAssignee: false, type: "User Story", from: "New", to: "Removed" }).ok).toBe(true);
       expect(decideStateChange({ role: "planner", isAssignee: false, type: "QA Test", from: "New", to: "Removed" }).ok).toBe(true);
-      expect(decideStateChange({ role: "planner", isAssignee: false, type: "Document", from: "New", to: "Removed" }).ok).toBe(false);
+      expect(decideStateChange({ role: "planner", isAssignee: false, type: "Document", from: "New", to: "Removed" }).ok).toBe(true);
+      expect(decideStateChange({ role: "author", isAssignee: true, type: "Document", from: "New", to: "Removed" }).ok).toBe(false);
       expect(decideStateChange({ role: "director", isAssignee: false, type: "Document", from: "In Review", to: "Removed" }).ok).toBe(true);
     });
   });
@@ -326,7 +327,10 @@ describe("workflow rules", () => {
       expect(claim("planner", "Epic")).toBe(true);
       expect(claim("director", "Feature")).toBe(true);
       expect(claim("readonly", "Task")).toBe(false);
-      expect(Object.keys(CLAIM_TYPES)).toEqual(["builder", "reviewer", "architect", "qa"]);
+      expect(Object.keys(CLAIM_TYPES)).toEqual(["builder", "reviewer", "architect", "author", "qa"]);
+      expect(claim("author", "Document")).toBe(true);
+      expect(claim("author", "User Story")).toBe(false);
+      expect(claim("author", "Task")).toBe(false);
       expect(claim("qa", "QA Test")).toBe(true);
       expect(claim("qa", "Defect")).toBe(false);
     });

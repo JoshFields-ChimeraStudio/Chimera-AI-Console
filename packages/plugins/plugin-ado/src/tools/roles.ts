@@ -17,6 +17,8 @@ const READ: readonly AdoToolName[] = [T.getWorkItem, T.getWorkflow, T.getPullReq
 /** Everyone but readonly may assign, within the workflow's assignment rules, and comment on pull requests. */
 const REVIEW: readonly AdoToolName[] = [...READ, T.addComment, T.setState, T.assign, T.postPullRequestComment];
 const BUILD: readonly AdoToolName[] = [...REVIEW, T.linkPullRequest, T.createPullRequest];
+/** Technical notes: the roles that plan and architect. */
+const PLAN: readonly AdoToolName[] = [...BUILD, T.setTechnicalNotes];
 
 /** Roles that may create at least one type (from the workflow's creation table) get the create tool. */
 const CREATORS = new Set<AdoRole>([...CREATION_RULES.flatMap((r) => r.roles), ...OTHER_TYPE_CREATION.roles]);
@@ -31,9 +33,10 @@ function policy(tools: readonly AdoToolName[], role: AdoRole): RolePolicy {
  * (src/workflow/).
  */
 export const ROLE_POLICIES: Record<AdoRole, RolePolicy> = {
-  director: policy(BUILD, "director"),
-  planner: policy(BUILD, "planner"),
-  architect: policy(BUILD, "architect"),
+  director: policy(PLAN, "director"),
+  planner: policy(PLAN, "planner"),
+  architect: policy(PLAN, "architect"),
+  author: policy(BUILD, "author"),
   builder: policy(BUILD, "builder"),
   reviewer: policy(REVIEW, "reviewer"),
   qa: policy(REVIEW, "qa"),

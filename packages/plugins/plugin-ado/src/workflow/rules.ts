@@ -6,7 +6,7 @@
  */
 
 /** Every ADO role, most rights first. The `agentRoles` setting picks one per agent. */
-export const ROLES = ["director", "planner", "architect", "builder", "reviewer", "qa", "readonly"] as const;
+export const ROLES = ["director", "planner", "architect", "author", "builder", "reviewer", "qa", "readonly"] as const;
 export type AdoRole = (typeof ROLES)[number];
 
 export const DEFAULT_ROLE: AdoRole = "readonly";
@@ -14,8 +14,9 @@ export const DEFAULT_ROLE: AdoRole = "readonly";
 export const ROLE_DESCRIPTIONS: Record<AdoRole, { who: string; notes: string }> = {
   director: { who: "Tiamat", notes: "Intake, Epic and Documentation, assigning approved work, Feature and Epic roll-up" },
   planner: { who: "Orochi", notes: "The plan and the work item tree: Features, Stories, Tasks, Reviews and QA Tests" },
-  architect: { who: "Ryujin", notes: "Technical notes, Ready For Approval, architecture Documents and Reviews" },
-  builder: { who: "Engineers, analysts and document authors", notes: "Their own Stories, Bugs, Documents, Tasks and Defects" },
+  architect: { who: "Ryujin, Fafnir", notes: "Technical notes, Ready For Approval, architecture Documents and Reviews" },
+  author: { who: "Zhulong, Fucanglong, Kukulkan", notes: "Their own Documents (product analysis, technical design, designs), each as a pull request" },
+  builder: { who: "Engineers", notes: "Their own Stories, Bugs, Documents, Tasks and Defects" },
   reviewer: { who: "Ladon and the other gate agents", notes: "Their own Review items" },
   qa: { who: "QA testers", notes: "Their own QA Test items, and the Defects they find" },
   readonly: { who: "Anyone not listed", notes: "Read only" },
@@ -59,8 +60,8 @@ export const HANDOFF_TYPES = [REVIEW_TYPE, QA_TEST_TYPE] as const;
 
 export const CREATION_RULES: readonly CreationRule[] = [
   { type: "Epic", roles: ["director", "planner"], parentTypes: null },
-  { type: "Documentation", roles: ["director"], parentTypes: ["Epic"] },
-  { type: DOCUMENT_TYPE, roles: ["director"], parentTypes: ["Documentation"] },
+  { type: "Documentation", roles: ["director", "planner"], parentTypes: ["Epic"], note: "the planner too, for a team with no director" },
+  { type: DOCUMENT_TYPE, roles: ["director", "planner"], parentTypes: ["Documentation"] },
   { type: "Feature", roles: ["planner"], parentTypes: ["Epic"] },
   { type: "User Story", roles: ["planner"], parentTypes: ["Feature"] },
   { type: "Bug", roles: ["planner"], parentTypes: null, note: "Josh enters Bugs in ADO" },
@@ -106,7 +107,7 @@ export const COMPLETED_STATE = "Completed";
 export const HANDOFF_STATES: readonly string[] = [READY_FOR_REVIEW_STATE, READY_FOR_TEST_STATE, READY_FOR_RETEST_STATE];
 
 export const STATE_RULES: readonly StateRule[] = [
-  { types: ["Epic"], states: ["Documenting"], setBy: ["director"], note: "the Documentation is being written" },
+  { types: ["Epic"], states: ["Documenting"], setBy: ["director", "planner"], note: "the Documentation is being written" },
   { types: ["Epic"], states: ["Planning"], setBy: ["director", "planner"], note: "the planner writes the plan" },
   { types: ["Epic"], states: ["Plan Review"], setBy: ["planner"], note: "the plan is written and waits for Josh" },
   { types: ["Epic"], states: ["In Progress"], setBy: [], note: "Josh approves the plan; this wakes the planner, who builds the work item tree" },
@@ -116,7 +117,7 @@ export const STATE_RULES: readonly StateRule[] = [
   {
     types: ["Documentation"],
     states: ["In Progress", BLOCKED_STATE, COMPLETED_STATE],
-    setBy: ["director"],
+    setBy: ["director", "planner"],
     note: "the plugin sets Completed when every Document under it is Completed or Removed",
   },
   {
@@ -126,7 +127,7 @@ export const STATE_RULES: readonly StateRule[] = [
     note: "In Review when its pull request is open for Josh; Completed when Josh merges it",
   },
   { types: [DOCUMENT_TYPE], states: [CHANGES_REQUESTED_STATE], setBy: [], note: "Josh asks for changes; the author sets In Progress and fixes" },
-  { types: [DOCUMENT_TYPE], states: ["Removed"], setBy: ["director"] },
+  { types: [DOCUMENT_TYPE], states: ["Removed"], setBy: ["director", "planner"] },
   { types: ["Feature"], states: ["Refining", "Technical Notes"], setBy: ["planner"], note: "Technical Notes: hand the Feature to the architect" },
   { types: ["Feature"], states: ["Ready For Approval"], setBy: ["architect", "planner"], note: "the breakdown is done and waits for Josh" },
   { types: ["Feature"], states: ["Ready For Work"], setBy: [], note: "Josh approves the breakdown; this wakes the Feature's owner, who assigns the work" },
@@ -199,6 +200,26 @@ export const ROLLUP_RULES: ReadonlyArray<{ type: string; activeStates: readonly 
   { type: "Documentation", activeStates: ["In Progress"] },
 ];
 
+/**
+ * The states that wait for Josh (D4): the toolbar's "Needs you" list and its
+ * Windows notifications. First match wins; "*" is any type.
+ */
+export const JOSH_WAITS: ReadonlyArray<{ types: readonly string[]; state: string; action: string }> = [
+  { types: ["Epic"], state: "Plan Review", action: "Approve the plan: set the Epic In Progress" },
+  { types: ["Feature"], state: "Ready For Approval", action: "Approve the breakdown: set the Feature Ready For Work" },
+  { types: ["User Story", "Bug"], state: "Ready To Merge", action: "Review and merge the pull request" },
+  { types: ["Document"], state: "In Review", action: "Review the document's pull request" },
+  { types: ["*"], state: "Blocked", action: "Answer the question" },
+];
+
+/** What Josh is asked to do about an item in this state, or null if it does not wait for him. */
+export function joshWaitFor(type: string, state: string): string | null {
+  const t = type.trim().toLowerCase();
+  const st = state.trim().toLowerCase();
+  const rule = JOSH_WAITS.find((r) => r.state.toLowerCase() === st && (r.types.includes("*") || r.types.some((x) => x.toLowerCase() === t)));
+  return rule?.action ?? null;
+}
+
 /** The signature on history entries the plugin writes itself (roll-ups). */
 export const PLUGIN_SIGNATURE = "ADO plugin";
 
@@ -208,10 +229,11 @@ export const ASSIGN_ANY_ROLES: readonly AdoRole[] = ["director", "planner"];
 export const ASSIGN_NONE_ROLES: readonly AdoRole[] = ["readonly"];
 
 /** What each role may claim for itself (director and planner assign anything; readonly nothing). */
-export const CLAIM_TYPES: Record<"builder" | "reviewer" | "architect" | "qa", readonly string[]> = {
+export const CLAIM_TYPES: Record<"builder" | "reviewer" | "architect" | "author" | "qa", readonly string[]> = {
   builder: ["User Story", "Bug", "Task", DEFECT_TYPE, DOCUMENT_TYPE],
   reviewer: [REVIEW_TYPE],
   architect: [DOCUMENT_TYPE, "Task", REVIEW_TYPE],
+  author: [DOCUMENT_TYPE],
   qa: [QA_TEST_TYPE],
 };
 

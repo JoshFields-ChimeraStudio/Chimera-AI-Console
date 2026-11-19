@@ -127,6 +127,13 @@ function rollupRule(item: AdoWorkItem) {
   return ROLLUP_RULES.find((r) => lower(r.type) === type) ?? null;
 }
 
+/** A roll-up type in the state where the plugin completes it. */
+function rollsUpNow(item: AdoWorkItem): boolean {
+  const rule = rollupRule(item);
+  const state = lower(String(item.fields["System.State"] ?? ""));
+  return !!rule && rule.activeStates.some((st) => lower(st) === state);
+}
+
 function revisionActor(u: AdoWorkItemUpdate, tagAgent: string | null, tagSetHere: boolean, serviceAccount: string | null): Actor {
   const history = u.fields["System.History"]?.newValue;
   const signed = typeof history === "string" ? htmlToText(history).match(SIGNED)?.[1]?.trim() : null;
@@ -203,8 +210,9 @@ export function createWorkItemWatcher(deps: WatchDeps) {
     if (!item.parentId) return [];
     const stateChanges = changes.filter((c) => c.to !== undefined);
     if (!stateChanges.length) return [];
-    // The plugin rolls these up itself; their owners hear only about a Blocked child.
-    if (parent && rollupRule(parent) && lower(item.state) !== lower(BLOCKED_STATE)) return [];
+    // While the plugin can roll the parent up (it is In Progress), its owner hears only about a Blocked child.
+    // Before that (an Epic still Documenting, say) the owner is told as usual.
+    if (parent && rollsUpNow(parent) && lower(item.state) !== lower(BLOCKED_STATE)) return [];
     const owner = await deps.findTaskForWorkItem(companyId, item.parentId);
     if (!owner?.assigneeAgentId || CLOSED_STATUSES.has(owner.status)) return [];
     const ownerName = await agentName(companyId, owner.assigneeAgentId);
