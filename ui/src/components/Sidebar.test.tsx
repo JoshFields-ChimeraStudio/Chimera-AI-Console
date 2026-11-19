@@ -6,6 +6,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
+import { Sidebar as ProductionSidebar } from "./Sidebar.production";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 vi.mock("@/hooks/useCoordinatorWorkspaceEnabled", () => ({
@@ -82,6 +83,26 @@ vi.mock("../api/instanceSettings", () => ({
   instanceSettingsApi: mockInstanceSettingsApi,
 }));
 
+const mockPluginsApi = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
+vi.mock("../api/plugins", () => ({
+  pluginsApi: mockPluginsApi,
+}));
+
+vi.mock("./SidebarCompanyMenu.production", () => ({
+  SidebarCompanyMenu: () => <div>Company menu</div>,
+}));
+
+vi.mock("./SidebarAgents.production", () => ({
+  SidebarAgents: () => <div data-testid="sidebar-agents">Active agents</div>,
+}));
+
+vi.mock("./SidebarStarredProjects.production", () => ({
+  SidebarStarredProjects: () => <div data-testid="sidebar-starred-projects" />,
+}));
+
 const mockInboxBadge = vi.hoisted(() => ({ inbox: 0, failedRuns: 0 }));
 
 vi.mock("../hooks/useInboxBadge", () => ({
@@ -138,7 +159,7 @@ async function flushReact() {
 describe("Sidebar", () => {
   let container: HTMLDivElement;
 
-  async function renderSidebar() {
+  async function renderSidebar(Component: (props: { children?: ReactNode }) => ReactNode = Sidebar) {
     const root = createRoot(container);
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -148,7 +169,7 @@ describe("Sidebar", () => {
       root.render(
         <QueryClientProvider client={queryClient}>
           <TooltipProvider>
-            <Sidebar />
+            <Component />
           </TooltipProvider>
         </QueryClientProvider>,
       );
@@ -169,6 +190,7 @@ describe("Sidebar", () => {
     mockSidebar.peeking = false;
     mockInboxBadge.inbox = 0;
     mockInboxBadge.failedRuns = 0;
+    mockPluginsApi.list.mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -682,6 +704,52 @@ describe("Sidebar", () => {
 
     flushSync(() => {
       root.unmount();
+    });
+  });
+  describe("Backlog item", () => {
+    const adoPlugin = (status: string) => ({ id: "plugin-ado-1", pluginKey: "chimera.plugin-ado", status });
+    const navLabels = () => [...container.querySelectorAll("nav a")].map((a) => a.textContent?.trim());
+
+    for (const [name, Component] of [["streamlined", Sidebar], ["production", ProductionSidebar]] as const) {
+      it(`${name}: shows Backlog directly below Tasks when the ADO plugin is ready`, async () => {
+        mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+        mockPluginsApi.list.mockResolvedValue([adoPlugin("ready")]);
+        const root = await renderSidebar(Component);
+
+        const labels = navLabels();
+        const tasksIndex = labels.indexOf("Tasks");
+        expect(tasksIndex).toBeGreaterThanOrEqual(0);
+        expect(labels[tasksIndex + 1]).toBe("Backlog");
+        const backlogLink = [...container.querySelectorAll("nav a")].find((a) => a.textContent?.trim() === "Backlog");
+        expect(backlogLink?.getAttribute("href")).toBe("/backlog");
+
+        flushSync(() => root.unmount());
+      });
+
+      it(`${name}: hides Backlog when the ADO plugin is missing or not ready`, async () => {
+        mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+        mockPluginsApi.list.mockResolvedValue([
+          adoPlugin("error"),
+          { id: "plugin-other", pluginKey: "chimera.plugin-llm-wiki", status: "ready" },
+        ]);
+        const root = await renderSidebar(Component);
+
+        expect(navLabels()).toContain("Tasks");
+        expect(navLabels()).not.toContain("Backlog");
+
+        flushSync(() => root.unmount());
+      });
+    }
+
+    it("hides Backlog when the plugin list cannot be read", async () => {
+      mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+      mockPluginsApi.list.mockRejectedValue(new Error("forbidden"));
+      const root = await renderSidebar();
+
+      expect(navLabels()).toContain("Tasks");
+      expect(navLabels()).not.toContain("Backlog");
+
+      flushSync(() => root.unmount());
     });
   });
 });

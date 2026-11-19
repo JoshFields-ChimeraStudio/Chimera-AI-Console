@@ -483,6 +483,10 @@ export function activityService(db: Db) {
           wakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`,
           contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`,
           contextIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
+          // Fork patch (Chimera): the session each run used, and why a fresh one started.
+          sessionId: sql<string | null>`coalesce(${heartbeatRuns.nativeSessionId}::text, ${heartbeatRuns.sessionIdAfter}, ${heartbeatRuns.sessionIdBefore})`,
+          sessionStartReason: sql<string | null>`${heartbeatRuns.contextSnapshot} -> 'paperclipSessionStart' ->> 'reason'`,
+          sessionResumedTaskSession: sql<boolean | null>`(${heartbeatRuns.contextSnapshot} -> 'paperclipSessionStart' ->> 'resumedTaskSession')::boolean`,
         })
         .from(heartbeatRuns)
         .innerJoin(
@@ -564,12 +568,26 @@ export function activityService(db: Db) {
           .where(and(eq(issueDocuments.companyId, companyId), eq(issueDocuments.issueId, issueId), eq(issueDocuments.key, "plan")))
           .limit(1)
         : Promise.resolve([]);
-      const [exhaustionRows, leaseRows, executionByRunId, [savedPlan]] = await Promise.all([
+      // Whether the provider actually resumed the session or started one (native runs).
+      const sessionEventRowsQuery = db
+        .select({ runId: heartbeatRunEvents.runId, eventType: heartbeatRunEvents.eventType })
+        .from(heartbeatRunEvents)
+        .where(and(
+          inArray(heartbeatRunEvents.runId, runIds),
+          inArray(heartbeatRunEvents.eventType, ["session.started", "session.resumed"]),
+        ))
+        .orderBy(asc(heartbeatRunEvents.runId), asc(heartbeatRunEvents.id));
+      const [exhaustionRows, leaseRows, executionByRunId, [savedPlan], sessionEventRows] = await Promise.all([
         exhaustionRowsQuery,
         leaseRowsQuery,
         executionProjectionsForRuns(db, companyId, runIds, new Date(), { retryDatabaseReads: true }),
         savedPlanQuery,
+        sessionEventRowsQuery,
       ]);
+      const sessionEventByRunId = new Map<string, "started" | "resumed">();
+      for (const row of sessionEventRows) {
+        if (!sessionEventByRunId.has(row.runId)) sessionEventByRunId.set(row.runId, row.eventType === "session.resumed" ? "resumed" : "started");
+      }
       const retryExhaustedReasonByRunId = new Map<string, string>();
       for (const row of exhaustionRows) {
         if (!row.message || retryExhaustedReasonByRunId.has(row.runId)) continue;
@@ -627,6 +645,7 @@ export function activityService(db: Db) {
               }
             : null,
           retryExhaustedReason: retryExhaustedReasonByRunId.get(run.runId) ?? null,
+          sessionEvent: sessionEventByRunId.get(run.runId) ?? null,
         };
       });
     },

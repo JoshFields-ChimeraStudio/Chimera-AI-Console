@@ -8,6 +8,7 @@
  * - a row in the plugin's ado_links table with the work item's current type, state,
  *   title and revision, for the chip and for reverse lookups.
  */
+import { notifyBacklogChanged } from "../backlog/notify.js";
 import type { Issue } from "@paperclipai/plugin-sdk";
 import { AdoError, type WorkItemSummary } from "../ado/client.js";
 import type { PluginDeps, WorkItemChangedHandler } from "../deps.js";
@@ -40,10 +41,23 @@ export interface AdoLink {
 export interface LinkFeatures {
   /** The ADO work item linked to a task, if any. Used by the A8 tools to default to the task's item. */
   findLinkByIssue(companyId: string, issueId: string): Promise<AdoLink | null>;
+  /** The link row of a work item in the configured project, if any. */
+  findLinkByWorkItem(companyId: string, workItemId: number): Promise<AdoLink | null>;
   /** Refreshes the stored state of a linked task. Does not create tasks (that is A3). */
   onWorkItemChanged: WorkItemChangedHandler;
   /** ADO answered 404 for a work item: mark its link, never delete it silently. */
   onWorkItemMissing?(companyId: string, workItemId: number, source: string): Promise<void>;
+  /** The task linked to a work item: by the task's origin (the indexed key), else by the link row. */
+  findTaskForWorkItem(companyId: string, workItemId: number): Promise<Issue | null>;
+  /** Every linked task of the company's configured org and project, by work item ID. */
+  listLinkedTasks(companyId: string): Promise<Map<number, Issue>>;
+  /** The origin a task linked to this work item carries, or null if the plugin is not configured. */
+  originFor(companyId: string, workItemId: number): Promise<{ originKind: string; originId: string } | null>;
+  /**
+   * Store the link row for a task just created with the work item's origin.
+   * Another task that won a race for the same item comes back as `winnerIssueId`.
+   */
+  attachCreatedTask(companyId: string, issueId: string, item: WorkItemSummary): Promise<{ ok: true } | { ok: false; winnerIssueId: string }>;
 }
 
 export interface IssueLinkData {
@@ -108,6 +122,11 @@ export function registerLinkFeatures(deps: PluginDeps, repo: LinkRepository = sq
     return repo.findByIssue(companyId, issueId);
   }
 
+  async function findLinkByWorkItem(companyId: string, workItemId: number): Promise<AdoLink | null> {
+    const key = await keyFor(companyId, workItemId);
+    return key ? repo.findByWorkItem(companyId, key) : null;
+  }
+
   const onWorkItemChanged: WorkItemChangedHandler = async (companyId, item: WorkItemSummary, source) => {
     const key = await keyFor(companyId, item.id);
     if (!key) return;
@@ -125,6 +144,67 @@ export function registerLinkFeatures(deps: PluginDeps, repo: LinkRepository = sq
     if (!key) return;
     const marked = await repo.markMissing(companyId, key, new Date(deps.now()).toISOString());
     if (marked > 0) ctx.logger.warn("Linked ADO work item not found; link marked as missing", { companyId, source, workItemId });
+  }
+
+  async function findTaskForWorkItem(companyId: string, workItemId: number): Promise<Issue | null> {
+    const key = await keyFor(companyId, workItemId);
+    if (!key) return null;
+    const byOrigin = await ctx.issues.list({ companyId, originKind: ADO_LINK_ORIGIN_KIND, originId: originIdFor(key) });
+    if (byOrigin.length > 0) {
+      // Nothing in core enforces one task per origin; prefer the one the link row names.
+      const row = await repo.findByWorkItem(companyId, key);
+      return byOrigin.find((i) => i.id === row?.issueId) ?? byOrigin[0]!;
+    }
+    const row = await repo.findByWorkItem(companyId, key);
+    return row ? ctx.issues.get(row.issueId, companyId) : null;
+  }
+
+  async function listLinkedTasks(companyId: string): Promise<Map<number, Issue>> {
+    const settings = await deps.settings(companyId);
+    const out = new Map<number, Issue>();
+    if (!settings) return out;
+    const prefix = `${orgName(settings.orgUrl)}/${settings.project}/`;
+    for (const issue of await ctx.issues.list({ companyId, originKind: ADO_LINK_ORIGIN_KIND })) {
+      if (!issue.originId?.startsWith(prefix)) continue;
+      const id = parseWorkItemId(issue.originId.slice(prefix.length));
+      if (id !== null && !out.has(id)) out.set(id, issue);
+    }
+    return out;
+  }
+
+  async function originFor(companyId: string, workItemId: number) {
+    const key = await keyFor(companyId, workItemId);
+    return key ? { originKind: ADO_LINK_ORIGIN_KIND, originId: originIdFor(key) } : null;
+  }
+
+  async function attachCreatedTask(
+    companyId: string,
+    issueId: string,
+    item: WorkItemSummary,
+  ): Promise<{ ok: true } | { ok: false; winnerIssueId: string }> {
+    const key = await keyFor(companyId, item.id);
+    if (!key) throw new Error("The Azure DevOps plugin is not configured for this company");
+    const record: AdoLink = {
+      issueId,
+      ...key,
+      type: item.type,
+      state: item.state,
+      title: item.title,
+      url: item.webUrl,
+      rev: item.rev,
+      syncedAt: new Date(deps.now()).toISOString(),
+      missingAt: null,
+    };
+    try {
+      await repo.insert(companyId, record);
+    } catch (err) {
+      if (!isUniqueViolation(err)) throw err;
+      const winner = await repo.findByWorkItem(companyId, key);
+      if (winner && winner.issueId !== issueId) return { ok: false, winnerIssueId: winner.issueId };
+      throw err;
+    }
+    ctx.logger.info("Task created for ADO work item", { companyId, issueId, workItemId: item.id });
+    return { ok: true };
   }
 
   async function link(companyId: string, issueId: string, workItemId: number, actorUserId: string | null): Promise<LinkResult> {
@@ -232,7 +312,9 @@ export function registerLinkFeatures(deps: PluginDeps, repo: LinkRepository = sq
     const workItemId = parseWorkItemId(params.workItemId);
     if (workItemId === null) return { ok: false, error: "Enter a work item ID, for example 123" };
     try {
-      return await link(companyId, issueId, workItemId, context?.actor?.userId ?? null);
+      const result = await link(companyId, issueId, workItemId, context?.actor?.userId ?? null);
+      if (result.ok) notifyBacklogChanged(ctx, companyId, { reason: "link", workItemId });
+      return result;
     } catch (err) {
       ctx.logger.error("Linking a task to ADO failed", { companyId, issueId, workItemId, error: errorText(err) });
       return { ok: false, error: `Linking failed: ${errorText(err)}` };
@@ -243,12 +325,14 @@ export function registerLinkFeatures(deps: PluginDeps, repo: LinkRepository = sq
     const companyId = companyIdFrom(params, context?.companyId);
     const issueId = issueIdFrom(params);
     try {
-      return await unlink(companyId, issueId, context?.actor?.userId ?? null);
+      const result = await unlink(companyId, issueId, context?.actor?.userId ?? null);
+      if (result.ok) notifyBacklogChanged(ctx, companyId, { reason: "link" });
+      return result;
     } catch (err) {
       ctx.logger.error("Unlinking a task from ADO failed", { companyId, issueId, error: errorText(err) });
       return { ok: false, error: `Unlinking failed: ${errorText(err)}` };
     }
   });
 
-  return { findLinkByIssue, onWorkItemChanged, onWorkItemMissing };
+  return { findLinkByIssue, findLinkByWorkItem, onWorkItemChanged, onWorkItemMissing, findTaskForWorkItem, listLinkedTasks, originFor, attachCreatedTask };
 }

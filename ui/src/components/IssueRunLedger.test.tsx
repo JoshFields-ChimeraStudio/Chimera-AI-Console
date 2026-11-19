@@ -7,7 +7,7 @@ import type { ActivityEvent, Issue, RunLivenessState } from "@paperclipai/shared
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunForIssue } from "../api/activity";
 import type { ActiveRunForIssue } from "../api/heartbeats";
-import { IssueRunLedgerContent } from "./IssueRunLedger";
+import { groupRunsBySession, IssueRunLedgerContent } from "./IssueRunLedger";
 
 vi.mock("@/lib/router", () => ({
   Link: ({ children, to, ...props }: { children: ReactNode; to: string } & ComponentProps<"a">) => (
@@ -260,6 +260,46 @@ describe("IssueRunLedger", () => {
     expect(newestIndex).toBeGreaterThanOrEqual(0);
     expect(activityIndex).toBeGreaterThan(newestIndex);
     expect(oldestIndex).toBeGreaterThan(activityIndex);
+  });
+
+  it("groups runs by agent session and says why each session started", () => {
+    const runs = [
+      createRun({ runId: "run-a1", sessionId: "11111111-aaaa", sessionStartReason: "no saved session for this task yet",
+        sessionResumedTaskSession: false, sessionEvent: "started", startedAt: "2026-04-18T19:50:00.000Z", createdAt: "2026-04-18T19:50:00.000Z" }),
+      createRun({ runId: "run-a2", sessionId: "11111111-aaaa", sessionStartReason: null,
+        sessionResumedTaskSession: true, sessionEvent: "resumed", startedAt: "2026-04-18T19:52:00.000Z", createdAt: "2026-04-18T19:52:00.000Z" }),
+      createRun({ runId: "run-b1", sessionId: "22222222-bbbb",
+        sessionStartReason: "the agent's configuration changed (managed instructions changed)",
+        sessionResumedTaskSession: false, sessionEvent: "started", startedAt: "2026-04-18T19:55:00.000Z", createdAt: "2026-04-18T19:55:00.000Z" }),
+    ];
+    const groups = groupRunsBySession(runs);
+    expect(groups.get("run-a1")).toBe(groups.get("run-a2"));
+    expect(groups.get("run-a2")).toMatchObject({ runIds: ["run-a1", "run-a2"], headRunId: "run-a2", startReason: "no saved session for this task yet" });
+    expect(groups.get("run-b1")).toMatchObject({ runIds: ["run-b1"], startReason: "the agent's configuration changed (managed instructions changed)" });
+
+    renderLedger({ runs });
+    const headers = [...container.querySelectorAll('[data-testid="run-session-header"]')].map((h) => h.textContent ?? "");
+    expect(headers).toHaveLength(2);
+    expect(headers[0]).toContain("22222222");
+    expect(headers[0]).toContain("1 run");
+    expect(headers[0]).toContain("started: the agent's configuration changed (managed instructions changed)");
+    expect(headers[1]).toContain("11111111");
+    expect(headers[1]).toContain("2 runs");
+    expect(headers[1]).toContain("started: no saved session for this task yet");
+    expect([...container.querySelectorAll('[data-testid="run-session-id"]')].map((c) => c.textContent)).toEqual([
+      "22222222 · started",
+      "11111111 · resumed",
+      "11111111 · started",
+    ]);
+  });
+
+  it("flags a session the provider could not resume, and old runs with no recorded reason", () => {
+    const groups = groupRunsBySession([
+      createRun({ runId: "run-x", sessionId: "33333333", sessionResumedTaskSession: true, sessionEvent: "started" }),
+      createRun({ runId: "run-old", sessionId: "44444444", startedAt: "2026-04-18T19:00:00.000Z", createdAt: "2026-04-18T19:00:00.000Z" }),
+    ]);
+    expect(groups.get("run-x")).toMatchObject({ providerRestarted: true, startReason: "continued a session from earlier runs" });
+    expect(groups.get("run-old")?.startReason).toBe("reason not recorded (run predates session tracking)");
   });
 
   it("shows live runs as pending final checks without missing-data language", () => {

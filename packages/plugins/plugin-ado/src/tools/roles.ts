@@ -4,34 +4,41 @@
  * ADO service account, so ADO itself cannot tell them apart; this table can.
  */
 import { TOOL_NAMES, type AdoToolName } from "./definitions.js";
+import { CREATION_RULES, DEFAULT_ROLE, OTHER_TYPE_CREATION, ROLES, isRole, type AdoRole } from "../workflow/index.js";
 
-export const ROLES = ["readonly", "builder", "reviewer", "planner"] as const;
-export type AdoRole = (typeof ROLES)[number];
+export { DEFAULT_ROLE, ROLES, type AdoRole };
 
 export interface RolePolicy {
   tools: readonly AdoToolName[];
-  /** Work item types the role may create with ado_create_child_work_item; "*" means any. */
-  createTypes: readonly string[] | "*";
 }
 
 const T = TOOL_NAMES;
+const READ: readonly AdoToolName[] = [T.getWorkItem, T.getWorkflow, T.getPullRequestThreads];
+/** Everyone but readonly may assign, within the workflow's assignment rules, and comment on pull requests. */
+const REVIEW: readonly AdoToolName[] = [...READ, T.addComment, T.setState, T.assign, T.postPullRequestComment];
+const BUILD: readonly AdoToolName[] = [...REVIEW, T.linkPullRequest, T.createPullRequest];
 
+/** Roles that may create at least one type (from the workflow's creation table) get the create tool. */
+const CREATORS = new Set<AdoRole>([...CREATION_RULES.flatMap((r) => r.roles), ...OTHER_TYPE_CREATION.roles]);
+
+function policy(tools: readonly AdoToolName[], role: AdoRole): RolePolicy {
+  return { tools: CREATORS.has(role) ? [...tools, T.createWorkItem] : tools };
+}
+
+/**
+ * The tool rights of each role. What a role may then do with a tool (which
+ * types it creates, which states it sets, whom it assigns) is the workflow's
+ * (src/workflow/).
+ */
 export const ROLE_POLICIES: Record<AdoRole, RolePolicy> = {
-  readonly: { tools: [T.getWorkItem], createTypes: [] },
-  builder: {
-    tools: [T.getWorkItem, T.addComment, T.setState, T.linkPullRequest, T.createChildWorkItem],
-    // Bugs are for problems found in production and are entered by Josh or a planner;
-    // review failures go back through PR comments and the story's state, not new items.
-    createTypes: ["Task"],
-  },
-  reviewer: { tools: [T.getWorkItem, T.addComment, T.setState], createTypes: [] },
-  planner: {
-    tools: [T.getWorkItem, T.addComment, T.setState, T.linkPullRequest, T.createChildWorkItem],
-    createTypes: "*",
-  },
+  director: policy(BUILD, "director"),
+  planner: policy(BUILD, "planner"),
+  architect: policy(BUILD, "architect"),
+  builder: policy(BUILD, "builder"),
+  reviewer: policy(REVIEW, "reviewer"),
+  qa: policy(REVIEW, "qa"),
+  readonly: policy(READ, "readonly"),
 };
-
-export const DEFAULT_ROLE: AdoRole = "readonly";
 
 export interface AgentRoleEntry {
   agent?: unknown;
@@ -57,10 +64,6 @@ export interface RoleDecision {
   role: AdoRole;
   /** Why a listed agent was given readonly instead of its listed role. */
   downgraded?: string;
-}
-
-function isRole(value: unknown): value is AdoRole {
-  return typeof value === "string" && (ROLES as readonly string[]).includes(value);
 }
 
 function entries(agentRoles: unknown): Array<{ name: string; role: AdoRole; agentId: string | null }> {
@@ -112,9 +115,4 @@ export async function resolveRole(
 
 export function roleAllows(role: AdoRole, tool: AdoToolName): boolean {
   return ROLE_POLICIES[role].tools.includes(tool);
-}
-
-export function roleMayCreate(role: AdoRole, type: string): boolean {
-  const allowed = ROLE_POLICIES[role].createTypes;
-  return allowed === "*" || allowed.some((t) => t.toLowerCase() === type.toLowerCase());
 }

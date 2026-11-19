@@ -9,6 +9,8 @@ import {
   readShippedPlugins,
   reconcileShippedPlugins,
   resolveShippedPluginSource,
+  shippedPluginKeys,
+  shippedPluginPackagePath,
   type ShippedPlugin,
   type ShippedPluginReconcileDeps,
 } from "../services/shipped-plugins.js";
@@ -363,5 +365,36 @@ describe("ensureShippedPlugins", () => {
     vi.mocked(deps.loader.installPlugin).mockRejectedValueOnce(new Error("migration failed"));
     const outcomes = await ensureShippedPlugins([...shipped(localPath), ...shipped(localPath)], deps);
     expect(outcomes.map((outcome) => outcome.action)).toEqual(["failed", "installed"]);
+  });
+});
+
+describe("shippedPluginKeys", () => {
+  function listFor(root: string) {
+    const listPath = path.join(root, "list.json");
+    writeFileSync(listPath, JSON.stringify([{ dir: PLUGIN_DIR, name: PLUGIN_NAME }]));
+    return { kind: "repository" as const, root, listPath };
+  }
+
+  it("holds the keys reconciled at startup, and nothing for a skipped plugin or without a source", async () => {
+    const repo = makeTempDir();
+    const localPath = writePluginCopy(repo);
+    const { deps } = harness([OTHER_ROW], new Map([[localPath, manifest("0.1.0")]]));
+    await reconcileShippedPlugins(listFor(repo), deps);
+    // Only listed plugins; a plugin installed by hand (OTHER_ROW) is not shipped.
+    expect([...shippedPluginKeys()]).toEqual([PLUGIN_KEY]);
+    // The trusted copy is the one that ships with this server.
+    expect(shippedPluginPackagePath(PLUGIN_KEY)).toBe(path.resolve(localPath));
+
+    const unbuilt = makeTempDir();
+    writePluginCopy(unbuilt, { built: false });
+    await reconcileShippedPlugins(listFor(unbuilt), harness([], new Map()).deps);
+    expect(shippedPluginKeys().size).toBe(0);
+
+    await reconcileShippedPlugins(listFor(repo), deps);
+    expect(shippedPluginKeys().has(PLUGIN_KEY)).toBe(true);
+    // Managed mode passes no source: no shipped plugins.
+    await reconcileShippedPlugins(null, deps);
+    expect(shippedPluginKeys().size).toBe(0);
+    expect(shippedPluginPackagePath(PLUGIN_KEY)).toBeNull();
   });
 });

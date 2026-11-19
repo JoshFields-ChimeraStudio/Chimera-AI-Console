@@ -482,8 +482,11 @@ interface PluginToolExecuteRequest {
   tool: string;
   /** Parameters matching the tool's declared JSON Schema. */
   parameters?: unknown;
-  /** Agent run context. projectId may be omitted or null when the run has no project. */
-  runContext: Omit<ToolRunContext, "projectId"> & { projectId?: string | null };
+  /**
+   * Agent run context. projectId may be omitted or null when the run has no project.
+   * Chimera fork: optional for an agent calling with a run token; taken from the token then.
+   */
+  runContext?: Omit<ToolRunContext, "projectId"> & { projectId?: string | null };
 }
 
 /**
@@ -1039,7 +1042,8 @@ export function pluginRoutes(
    * Request body:
    * - `tool`: Fully namespaced tool name (e.g., "acme.linear:search-issues")
    * - `parameters`: Parameters matching the tool's declared JSON Schema
-   * - `runContext`: Agent run context with agentId, runId, companyId, projectId
+   * - `runContext`: Agent run context with agentId, runId, companyId, projectId.
+   *   Optional for an agent calling with its run token (Chimera fork): taken from the token.
    *
    * Response: `ToolExecutionResult`
    * Errors:
@@ -1062,13 +1066,21 @@ export function pluginRoutes(
       return;
     }
 
-    const { tool, parameters, runContext: requestedRunContext } = body;
+    const { tool, parameters } = body;
 
     // Validate required fields
     if (!tool || typeof tool !== "string") {
       res.status(400).json({ error: '"tool" is required and must be a string' });
       return;
     }
+
+    // Chimera fork: an agent calling with its run token may omit runContext;
+    // it is taken from the token (the same values the checks below require).
+    // Agents on small models got runContext wrong or never found this route.
+    const requestedRunContext: PluginToolExecuteRequest["runContext"] =
+      body.runContext === undefined && req.actor.type === "agent" && req.actor.agentId && req.actor.companyId && req.actor.runId
+        ? { agentId: req.actor.agentId, runId: req.actor.runId, companyId: req.actor.companyId }
+        : body.runContext;
 
     if (!requestedRunContext || typeof requestedRunContext !== "object") {
       res.status(400).json({ error: '"runContext" is required and must be an object' });

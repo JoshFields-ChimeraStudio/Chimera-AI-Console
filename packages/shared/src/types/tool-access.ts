@@ -1434,6 +1434,7 @@ export type ToolAccessReasonCode =
   | "allow_profile"
   | "allow_explicit_grant"
   | "allow_policy"
+  | "allow_shipped_plugin"
   | "requires_review_changed_tool"
   | "requires_approval_policy"
   | "deny_default"
@@ -1613,6 +1614,8 @@ export interface ToolAccessDecisionInput {
     catalogEntryId?: string | null;
     providerType?: string | null;
     applicationKey?: string | null;
+    /** Database id of the plugin that provides a `paperclip_plugin` tool. */
+    pluginId?: string | null;
     upstreamToolName?: string | null;
     riskLevel?: ToolRiskLevel | string | null;
     toolName: string;

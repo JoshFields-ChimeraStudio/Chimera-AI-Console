@@ -1,17 +1,55 @@
 /**
  * A8: ADO tools for agents. All agent writes to ADO go through these tools,
- * which check the agent's role, attribute the write to the agent ("[Name]"),
- * record it in the Paperclip activity log, and guard every update with a
- * `test /rev` so concurrent edits are never overwritten.
- * See doc/plans/2026-11-14-ado-integration.md, "A8".
+ * which check the agent's role and the workflow rules (src/workflow/),
+ * attribute the write to the agent ("[Name]"), record it in the Paperclip
+ * activity log, and guard every update with a `test /rev` so concurrent edits
+ * are never overwritten. See doc/plans/2026-11-14-ado-integration.md, "A8",
+ * and doc/plans/2026-11-17-agent-workflow.md.
  */
-import type { ToolResult, ToolRunContext } from "@paperclipai/plugin-sdk";
-import { AdoError, type AdoClient, type AdoWorkItem, type AdoWorkItemState, type JsonPatchOp } from "../ado/client.js";
+import type { Agent, ToolResult, ToolRunContext } from "@paperclipai/plugin-sdk";
+import {
+  AdoError,
+  PR_THREAD_STATUSES,
+  type AdoClient,
+  type AdoPullRequest,
+  type AdoWorkItem,
+  type AdoWorkItemState,
+  type AdoWorkItemUpdate,
+  type JsonPatchOp,
+  type PrThreadStatus,
+} from "../ado/client.js";
 import type { PluginDeps } from "../deps.js";
 import type { LinkFeatures } from "../links/index.js";
+import { unassignableReason, type AssignDetails, type Assigner } from "../backlog/assign.js";
+import { BacklogError } from "../backlog/errors.js";
+import {
+  APPROVED_STATE,
+  BLOCKED_STATE,
+  CHANGES_REQUESTED_STATE,
+  COMPLETED_STATE,
+  DEFECT_TYPE,
+  FINAL_STATES,
+  HANDOFF_TYPES,
+  PASSED_STATE,
+  QA_TEST_TYPE,
+  READY_TO_MERGE_STATE,
+  REVIEW_ROUND_LIMIT,
+  REVIEW_TYPE,
+  STORY_TYPES,
+  assignmentNeedsParent,
+  creationRule,
+  decideAssignment,
+  decideCreate,
+  decideStateChange,
+  rolesThatMayCreate,
+  stateSetters,
+  typeHasParent,
+  workflowData,
+  workflowText,
+} from "../workflow/index.js";
 import { TOOL_DECLARATIONS, TOOL_NAMES, type AdoToolName } from "./definitions.js";
 import { attributedHtml, htmlToText, textToHtml } from "./html.js";
-import { ROLE_POLICIES, pruneBindings, resolveRole, roleAllows, roleMayCreate, type AdoRole, type RoleBindings, type RoleBindingStore } from "./roles.js";
+import { ROLE_POLICIES, pruneBindings, resolveRole, roleAllows, type AdoRole, type RoleBindings, type RoleBindingStore } from "./roles.js";
 import { agentTag, hasOnlyAgentTag, withAgentTag } from "./tags.js";
 
 /** Work item type states change rarely; cache them briefly per company and type. */
@@ -40,7 +78,15 @@ class ToolFailure extends Error {}
 
 type Params = Record<string, unknown>;
 
-export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): AgentTools {
+/** Wakeup context source of an assignment made by an agent tool. */
+const AGENT_ASSIGN_SOURCE = "plugin.ado.agent-assign";
+
+export function registerAgentTools(
+  deps: PluginDeps,
+  links: Pick<LinkFeatures, "findLinkByIssue" | "findTaskForWorkItem">,
+  /** The Backlog view's assignment path; without it the assignment tools report that assigning is unavailable. */
+  assigner: Assigner | null = null,
+): AgentTools {
   const { ctx } = deps;
   const stateCache = new Map<string, { states: AdoWorkItemState[]; expires: number }>();
   const runIssues = new Map<string, string>();
@@ -117,6 +163,75 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
     return link.workItemId;
   }
 
+  /** The project of the task this run is working on, for a new linked task with no linked parent. */
+  async function runTaskProjectId(run: ToolRunContext): Promise<string | null> {
+    const issueId = await runIssueId(run);
+    if (!issueId) return null;
+    const issue = await ctx.issues.get(issueId, run.companyId).catch(() => null);
+    return issue?.projectId ?? null;
+  }
+
+  /** An agent of the company by name (case-insensitive) or ID. Live agents win over terminated ones with the same name. */
+  async function findAgent(companyId: string, nameOrId: string): Promise<Agent> {
+    const wanted = nameOrId.trim().toLowerCase();
+    const all = await ctx.agents.list({ companyId, limit: 500 });
+    const byId = all.find((a) => a.id === nameOrId.trim());
+    if (byId) return byId;
+    const named = all.filter((a) => a.name.trim().toLowerCase() === wanted);
+    const live = named.filter((a) => a.status !== "terminated");
+    if (live.length > 1) throw new ToolFailure(`More than one agent is called "${nameOrId}". Ask the board which one is meant.`);
+    const agent = live[0] ?? named[0];
+    if (!agent) throw new ToolFailure(`No agent called "${nameOrId}" was found in this company.`);
+    return agent;
+  }
+
+  /** Assign through the shared Backlog path, as the calling agent, under the workflow's assignment rules. */
+  async function assignAs(caller: Caller, workItemId: number, target: Agent, note: string | null): Promise<AssignDetails> {
+    if (!assigner) throw new ToolFailure("Assigning work items is not available in this plugin build.");
+    const { run } = caller;
+    try {
+      return await assigner.assign({
+        companyId: run.companyId,
+        workItemId,
+        agentId: target.id,
+        actor: { actorAgentId: run.agentId },
+        wakeSource: AGENT_ASSIGN_SOURCE,
+        note: note ? { body: `[${caller.agentName}] ${note}`, authorAgentId: run.agentId } : null,
+        fallbackProjectId: () => runTaskProjectId(run),
+        async authorize(facts) {
+          const current = facts.task ? { agentId: facts.task.assigneeAgentId ?? null, userId: facts.task.assigneeUserId ?? null } : null;
+          const holder = current?.agentId === run.agentId ? await facts.holder() : null;
+          const wi = await facts.item();
+          const input = {
+            role: caller.role,
+            callerAgentId: run.agentId,
+            targetAgentId: target.id,
+            item: { type: wi.type, tags: wi.tags },
+            current,
+            heldByClaim: holder?.kind === "claimed",
+          };
+          const parentAssigneeAgentId = assignmentNeedsParent(input) ? ((await facts.parentTask())?.assigneeAgentId ?? null) : null;
+          const decision = decideAssignment({ ...input, parentAssigneeAgentId });
+          if (!decision.ok) throw new ToolFailure(`${decision.reason} Read the rules with ado_get_workflow.`);
+          return { claimed: decision.rule === "claim" };
+        },
+      });
+    } catch (err) {
+      if (err instanceof BacklogError) throw new ToolFailure(err.message);
+      throw err;
+    }
+  }
+
+  function assignedText(workItemId: number, target: Agent, result: AssignDetails): string {
+    const task = result.identifier ?? result.issueId;
+    const what = result.created
+      ? `created task ${task} for it, in To do`
+      : result.changed
+        ? `reassigned its task ${task}`
+        : `its task ${task} was already assigned to ${target.name}; nothing changed`;
+    return `ADO #${workItemId} assigned to ${target.name}: ${what}.` + (result.noteError ? ` The note could not be posted: ${result.noteError}` : "");
+  }
+
   async function typeStates(companyId: string, ado: AdoClient, type: string): Promise<AdoWorkItemState[]> {
     const key = `${companyId}\u0000${type.toLowerCase()}`;
     const hit = stateCache.get(key);
@@ -127,7 +242,7 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
   }
 
   /** Record a write in the Paperclip activity log; on the run's task when there is one. */
-  async function audit(caller: Caller, action: string, workItemId: number, summary: string, extra: Record<string, unknown> = {}) {
+  async function audit(caller: Caller, action: string, workItemId: number | null, summary: string, extra: Record<string, unknown> = {}) {
     const { run } = caller;
     try {
       const issueId = await runIssueId(run);
@@ -175,6 +290,58 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
     }
   }
 
+  /** The work items directly under an item, with their type and state. */
+  async function childrenOf(ado: AdoClient, item: AdoWorkItem): Promise<Array<{ id: number; type: string; state: string; rev: number; tags: unknown }>> {
+    const out: Array<{ id: number; type: string; state: string; rev: number; tags: unknown }> = [];
+    for (const r of item.relations ?? []) {
+      if (r.rel !== "System.LinkTypes.Hierarchy-Forward") continue;
+      const childId = idFromUrl(r.url);
+      if (!childId) continue;
+      const child = await ado.getWorkItem(childId);
+      out.push({
+        id: childId,
+        type: String(child.fields["System.WorkItemType"] ?? ""),
+        state: String(child.fields["System.State"] ?? ""),
+        rev: child.rev,
+        tags: child.fields["System.Tags"],
+      });
+    }
+    return out;
+  }
+
+  /** Whether the caller holds the linked task of the item's ADO parent. */
+  async function ownsParent(caller: Caller, item: AdoWorkItem): Promise<boolean> {
+    const parentId = parentIdOf(item);
+    if (!parentId) return false;
+    const task = await links.findTaskForWorkItem(caller.run.companyId, parentId);
+    return !!task?.assigneeAgentId && task.assigneeAgentId === caller.run.agentId;
+  }
+
+  /** The work items a new pull request links to: the ones given, or the current task's. */
+  async function prWorkItemIds(caller: Caller, given: unknown): Promise<number[]> {
+    if (given === undefined || given === null) return [await resolveWorkItemId(caller.run, undefined)];
+    if (!Array.isArray(given) || !given.length) throw new ToolFailure("workItemIds must be a non-empty list of work item IDs.");
+    return [...new Set(given.map((v, i) => positiveInt(v, `workItemIds[${i}]`)))];
+  }
+
+  /** The work item of the current task, if there is one, for the activity log. */
+  async function runWorkItemId(run: ToolRunContext): Promise<number | null> {
+    const issueId = await runIssueId(run);
+    if (!issueId) return null;
+    return (await links.findLinkByIssue(run.companyId, issueId))?.workItemId ?? null;
+  }
+
+  async function findPullRequest(ado: AdoClient, params: Params): Promise<AdoPullRequest> {
+    const id = positiveInt(params.pullRequestId, "pullRequestId");
+    const repoName = optionalText(params.repository, "repository")?.trim() ?? null;
+    if (repoName) {
+      const repo = await withNotFound(ado.getRepository(repoName), `Repository "${repoName}" was not found in the ADO project.`);
+      const pr = await withNotFound(ado.getPullRequest(repo.id, id), `Pull request ${id} was not found in repository ${repo.name}.`);
+      return { ...pr, repositoryName: pr.repositoryName || repo.name };
+    }
+    return withNotFound(ado.getPullRequest(null, id), `Pull request ${id} was not found in the ADO project.`);
+  }
+
   const handlers: Record<AdoToolName, (caller: Caller, params: Params, ado: AdoClient) => Promise<ToolResult>> = {
     async [TOOL_NAMES.getWorkItem](caller, params, ado) {
       const id = await resolveWorkItemId(caller.run, params.workItemId);
@@ -183,7 +350,7 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
       const comments = commentCount > 0 ? await ado.listComments(id, commentCount) : { comments: [], totalCount: 0 };
       const data = {
         ...describeWorkItem(item, ado.webUrl(id)),
-        comments: comments.comments.map((c) => ({ id: c.id, author: c.createdBy, date: c.createdDate, text: clip(htmlToText(c.text)) })),
+        comments: comments.comments.map((c) => ({ id: c.id, author: c.createdBy, date: c.createdDate, text: clip(c.format === "markdown" ? c.text : htmlToText(c.text)) })),
         totalComments: comments.totalCount,
       };
       return { content: JSON.stringify(data, null, 2), data };
@@ -214,6 +381,54 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
       if (match.name === current) {
         return { content: `Work item #${id} is already ${current}; nothing changed.`, data: { workItemId: id, state: current, changed: false } };
       }
+      const task = await links.findTaskForWorkItem(caller.run.companyId, id);
+      const isAssignee = !!task?.assigneeAgentId && task.assigneeAgentId === caller.run.agentId;
+      const isParentOwner = stateSetters(type, match.name, current).setBy.includes("owner-of-parent") ? await ownsParent(caller, item) : false;
+      const decision = decideStateChange({ role: caller.role, isAssignee, isParentOwner, type, from: current, to: match.name });
+      if (!decision.ok) throw new ToolFailure(`${decision.reason} Read the rules with ado_get_workflow.`);
+      const to = match.name.toLowerCase();
+      const isStory = STORY_TYPES.some((t) => t.toLowerCase() === type.toLowerCase());
+      const isFinal = (state: string) => FINAL_STATES.some((f) => f.toLowerCase() === state.toLowerCase());
+      const ofType = (children: Awaited<ReturnType<typeof childrenOf>>, t: string) =>
+        children.filter((c) => c.type.toLowerCase() === t.toLowerCase() && c.state.toLowerCase() !== "removed");
+      let toClose: Awaited<ReturnType<typeof childrenOf>> = [];
+      if (isStory && to === READY_TO_MERGE_STATE.toLowerCase()) {
+        // Josh's turn only once every reviewer has approved.
+        const reviews = ofType(await childrenOf(ado, item), REVIEW_TYPE);
+        const open = reviews.filter((r) => ![APPROVED_STATE, COMPLETED_STATE].some((s) => s.toLowerCase() === r.state.toLowerCase()));
+        if (!reviews.length) {
+          throw new ToolFailure(`Not changed: #${id} has no ${REVIEW_TYPE} under it. The planner creates them; ask on your task (paperclip_block) if one is missing.`);
+        }
+        if (open.length) {
+          throw new ToolFailure(
+            `Not changed: #${id} has ${REVIEW_TYPE}s that are not ${APPROVED_STATE} (${open.map((r) => `#${r.id} ${r.state}`).join(", ")}). ` +
+              `Set ${READY_TO_MERGE_STATE} when every ${REVIEW_TYPE} under it is ${APPROVED_STATE}; you are woken when one changes.`,
+          );
+        }
+      }
+      if (isStory && to === COMPLETED_STATE.toLowerCase()) {
+        const children = await childrenOf(ado, item);
+        const tests = ofType(children, QA_TEST_TYPE);
+        const failing = tests.filter((t) => ![PASSED_STATE, COMPLETED_STATE].some((s) => s.toLowerCase() === t.state.toLowerCase()));
+        const defects = ofType(children, DEFECT_TYPE).filter((d) => !isFinal(d.state));
+        if (failing.length || defects.length) {
+          throw new ToolFailure(
+            `Not changed: #${id} is not done testing (` +
+              [...failing.map((t) => `${QA_TEST_TYPE} #${t.id} ${t.state}`), ...defects.map((d) => `${DEFECT_TYPE} #${d.id} ${d.state}`)].join(", ") +
+              `). Set ${COMPLETED_STATE} when every ${QA_TEST_TYPE} is ${PASSED_STATE} and every ${DEFECT_TYPE} is ${COMPLETED_STATE}; you are woken when one changes.`,
+          );
+        }
+        toClose = children.filter((c) => HANDOFF_TYPES.some((t) => t.toLowerCase() === c.type.toLowerCase()) && !isFinal(c.state));
+      }
+      if (type.toLowerCase() === REVIEW_TYPE.toLowerCase() && to === CHANGES_REQUESTED_STATE.toLowerCase()) {
+        const rounds = countReviewRounds(await ado.listUpdates(id));
+        if (rounds + 1 >= REVIEW_ROUND_LIMIT) {
+          throw new ToolFailure(
+            `Not changed: this would be round ${rounds + 1} of changes on ${REVIEW_TYPE} #${id} since it last approved, and the limit is ${REVIEW_ROUND_LIMIT - 1}. ` +
+              `Set #${id} to ${BLOCKED_STATE} instead, with a comment for Josh summarizing what is still wrong and what was tried.`,
+          );
+        }
+      }
       const history = `Changed state from ${current} to ${match.name}.` + (note ? `\n${note}` : "");
       const updated = await ado.updateWorkItem(id, [
         { op: "test", path: "/rev", value: item.rev },
@@ -221,10 +436,27 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
         { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, history) },
         { op: "add", path: "/fields/System.Tags", value: withAgentTag(item.fields["System.Tags"], caller.agentName) },
       ]);
-      await audit(caller, "state_changed", id, `moved ADO #${id} from ${current} to ${match.name}`, { from: current, to: match.name, rev: updated.rev });
+      await audit(caller, "state_changed", id, `moved ADO #${id} from ${current} to ${match.name}`, {
+        from: current,
+        to: match.name,
+        rev: updated.rev,
+        rule: decision.rule,
+      });
+      // The Reviews and QA Tests of a finished item close with it.
+      const closed: number[] = [];
+      for (const c of toClose) {
+        await ado.updateWorkItem(c.id, [
+          { op: "test", path: "/rev", value: c.rev },
+          { op: "replace", path: "/fields/System.State", value: COMPLETED_STATE },
+          { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, `Closed with #${id}, which is ${COMPLETED_STATE}.`) },
+          { op: "add", path: "/fields/System.Tags", value: withAgentTag(c.tags, caller.agentName) },
+        ]);
+        await audit(caller, "state_changed", c.id, `closed ADO #${c.id} with #${id}`, { from: c.state, to: COMPLETED_STATE });
+        closed.push(c.id);
+      }
       return {
-        content: `Work item #${id} moved from ${current} to ${match.name}.`,
-        data: { workItemId: id, from: current, state: match.name, rev: updated.rev, changed: true },
+        content: `Work item #${id} moved from ${current} to ${match.name}.` + (closed.length ? ` Closed with it: ${closed.map((c) => `#${c}`).join(", ")}.` : ""),
+        data: { workItemId: id, from: current, state: match.name, rev: updated.rev, changed: true, ...(closed.length ? { closed } : {}) },
       };
     },
 
@@ -261,34 +493,216 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
       };
     },
 
-    async [TOOL_NAMES.createChildWorkItem](caller, params, ado) {
-      const type = requiredText(params.type, "type").trim();
+    async [TOOL_NAMES.createWorkItem](caller, params, ado) {
+      const requested = requiredText(params.type, "type").trim();
+      const type = creationRule(requested)?.type ?? requested;
       const title = requiredText(params.title, "title").trim();
       const description = optionalText(params.description, "description");
-      if (!roleMayCreate(caller.role, type)) {
-        const allowed = ROLE_POLICIES[caller.role].createTypes;
-        throw new ToolFailure(
-          `Your ADO role (${caller.role}) may not create ${type} work items` +
-            (Array.isArray(allowed) && allowed.length ? `; it may create: ${allowed.join(", ")}.` : "."),
-        );
+      const acceptanceCriteria = optionalText(params.acceptanceCriteria, "acceptanceCriteria");
+      const assignTo = optionalText(params.assignTo, "assignTo")?.trim() ?? null;
+      const { role } = caller;
+      // Refuse a type the role may not create before reading anything.
+      if (!rolesThatMayCreate(type).includes(role)) throw new ToolFailure(denial(decideCreate({ role, type, parentType: null })));
+      if (acceptanceCriteria && !typeHasAcceptanceCriteria(type)) {
+        throw new ToolFailure(`Nothing was created: a ${type} has no acceptance criteria field; put the criteria in the description.`);
       }
-      const parentId = await resolveWorkItemId(caller.run, params.parentId, "parentId");
-      const parent = await withNotFound(ado.getWorkItem(parentId), `Parent work item #${parentId} was not found.`);
+      const givenParent = params.parentId !== undefined && params.parentId !== null;
+      let parent: AdoWorkItem | null = null;
+      let parentId: number | null = null;
+      if (typeHasParent(type) || givenParent) {
+        parentId = await resolveWorkItemId(caller.run, params.parentId, "parentId");
+        parent = await withNotFound(ado.getWorkItem(parentId), `Parent work item #${parentId} was not found.`);
+      }
+      const parentType = parent ? String(parent.fields["System.WorkItemType"] ?? "") : null;
+      const decision = decideCreate({ role, type, parentType });
+      if (!decision.ok) throw new ToolFailure(denial(decision));
+      const target = assignTo ? await findAgent(caller.run.companyId, assignTo) : null;
+      if (target) {
+        // Check the target and the assignment rules (a new item has no linked task) before anything is created.
+        const problem = unassignableReason(target);
+        if (problem) throw new ToolFailure(`Nothing was created: ${problem}.`);
+        const input = { role, callerAgentId: caller.run.agentId, targetAgentId: target.id, item: { type, tags: null }, current: null };
+        const parentTask = parentId && assignmentNeedsParent(input) ? await links.findTaskForWorkItem(caller.run.companyId, parentId) : null;
+        const pre = decideAssignment({ ...input, parentAssigneeAgentId: parentTask?.assigneeAgentId ?? null });
+        if (!pre.ok) throw new ToolFailure(`Nothing was created: ${denial(pre)}`);
+      }
       const ops: JsonPatchOp[] = [
         { op: "add", path: "/fields/System.Title", value: title },
         ...(description ? [{ op: "add" as const, path: "/fields/System.Description", value: textToHtml(description) }] : []),
-        ...inherit(parent, "System.AreaPath"),
-        ...inherit(parent, "System.IterationPath"),
-        { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, `Created as a child of #${parentId}.`) },
+        ...(acceptanceCriteria
+          ? [{ op: "add" as const, path: "/fields/Microsoft.VSTS.Common.AcceptanceCriteria", value: textToHtml(acceptanceCriteria) }]
+          : []),
+        ...(parent ? [...inherit(parent, "System.AreaPath"), ...inherit(parent, "System.IterationPath")] : []),
+        { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, parentId ? `Created as a child of #${parentId}.` : "Created.") },
         { op: "add", path: "/fields/System.Tags", value: agentTag(caller.agentName) },
-        { op: "add", path: "/relations/-", value: { rel: "System.LinkTypes.Hierarchy-Reverse", url: ado.workItemApiUrl(parentId) } },
+        ...(parentId ? [{ op: "add" as const, path: "/relations/-", value: { rel: "System.LinkTypes.Hierarchy-Reverse", url: ado.workItemApiUrl(parentId) } }] : []),
       ];
       const created = await ado.createWorkItem(type, ops);
-      await audit(caller, "work_item_created", created.id, `created ${type} ADO #${created.id} under #${parentId}`, { parentId, type, title });
+      const where = parentId ? ` under #${parentId}` : "";
+      await audit(caller, "work_item_created", created.id, `created ${type} ADO #${created.id}${where}`, { parentId, type, title, rule: decision.rule });
+      const data: Record<string, unknown> = { workItemId: created.id, parentId, type, url: ado.webUrl(created.id) };
+      let content = `Created ${type} #${created.id} "${title}"${where}: ${ado.webUrl(created.id)}`;
+      if (target) {
+        // The item exists now: report a refused or failed assignment in the reply, not as an error, so it is not created twice.
+        try {
+          const result = await assignAs(caller, created.id, target, null);
+          await audit(caller, "work_item_assigned", created.id, `assigned ADO #${created.id} to ${target.name}`, assignedMeta(target, result));
+          data.assignment = { agentId: target.id, agentName: target.name, issueId: result.issueId, identifier: result.identifier, created: result.created };
+          content += `\n${assignedText(created.id, target, result)}`;
+        } catch (err) {
+          const reason = err instanceof ToolFailure ? err.message : errorText(err);
+          data.assignmentError = reason;
+          content += `\nIt was not assigned to ${target.name}: ${reason}`;
+        }
+      }
+      return { content, data };
+    },
+
+    async [TOOL_NAMES.assign](caller, params) {
+      const agentName = requiredText(params.agent, "agent").trim();
+      const note = optionalText(params.note, "note");
+      const id = await resolveWorkItemId(caller.run, params.workItemId);
+      const target = await findAgent(caller.run.companyId, agentName);
+      const result = await assignAs(caller, id, target, note);
+      await audit(caller, "work_item_assigned", id, `assigned ADO #${id} to ${target.name}`, assignedMeta(target, result));
       return {
-        content: `Created ${type} #${created.id} "${title}" under #${parentId}: ${ado.webUrl(created.id)}`,
-        data: { workItemId: created.id, parentId, type, url: ado.webUrl(created.id) },
+        content: assignedText(id, target, result),
+        data: {
+          workItemId: id,
+          agentId: target.id,
+          agentName: target.name,
+          issueId: result.issueId,
+          identifier: result.identifier,
+          created: result.created,
+          changed: result.changed,
+          ...(result.noteError ? { noteError: result.noteError } : {}),
+        },
       };
+    },
+
+    async [TOOL_NAMES.createPullRequest](caller, params, ado) {
+      const repoName = requiredText(params.repository, "repository").trim();
+      const sourceBranch = branchParam(params.sourceBranch, "sourceBranch");
+      const targetBranch = params.targetBranch === undefined || params.targetBranch === null ? "main" : branchParam(params.targetBranch, "targetBranch");
+      if (sourceBranch === targetBranch) throw new ToolFailure("sourceBranch and targetBranch are the same branch; push your work to its own branch first.");
+      const title = requiredText(params.title, "title").trim();
+      const description = optionalText(params.description, "description");
+      const workItemIds = await prWorkItemIds(caller, params.workItemIds);
+      const repo = await withNotFound(ado.getRepository(repoName), `Repository "${repoName}" was not found in the ADO project.`);
+      const existing = await ado.findActivePullRequest(repo.id, sourceBranch, targetBranch);
+      if (existing) {
+        return {
+          content:
+            `An active pull request from ${sourceBranch} into ${targetBranch} already exists: ${existing.pullRequestId} "${existing.title}" ` +
+            `(${ado.pullRequestWebUrl(repo.name, existing.pullRequestId)}). Push more commits to the branch to update it; link it to other work items with ado_create_pr_link.`,
+          data: prData(ado, repo.name, existing, false),
+        };
+      }
+      const signed = `${description ? `${description.trim()}\n\n` : ""}_Opened by [${caller.agentName}]._`;
+      const pr = await withNotFound(
+        ado.createPullRequest(repo.id, { sourceBranch, targetBranch, title, description: signed, workItemIds }),
+        `ADO could not open the pull request: branch ${sourceBranch} or ${targetBranch} was not found in ${repo.name}. Push the branch first.`,
+      );
+      await audit(caller, "pull_request_created", workItemIds[0] ?? null, `opened PR ${pr.pullRequestId} in ${repo.name} (${sourceBranch} into ${targetBranch})`, {
+        repositoryId: repo.id,
+        repository: repo.name,
+        pullRequestId: pr.pullRequestId,
+        workItemIds,
+      });
+      return {
+        content:
+          `Opened pull request ${pr.pullRequestId} "${pr.title}" from ${sourceBranch} into ${targetBranch} in ${repo.name}, ` +
+          `linked to ${workItemIds.map((id) => `#${id}`).join(", ")}: ${ado.pullRequestWebUrl(repo.name, pr.pullRequestId)}`,
+        data: { ...prData(ado, repo.name, pr, true), workItemIds },
+      };
+    },
+
+    async [TOOL_NAMES.getPullRequestThreads](_caller, params, ado) {
+      const pr = await findPullRequest(ado, params);
+      const includeSystem = params.includeSystem === true;
+      const threads = (await ado.listPullRequestThreads(pr.repositoryId, pr.pullRequestId))
+        .map((t) => ({ ...t, comments: includeSystem ? t.comments : t.comments.filter((c) => c.commentType !== "system") }))
+        .filter((t) => t.comments.length > 0);
+      const repoLabel = pr.repositoryName || pr.repositoryId;
+      const lines = [
+        `Pull request ${pr.pullRequestId} "${pr.title}" (${pr.status}) in ${repoLabel}, ${pr.sourceBranch ?? "?"} into ${pr.targetBranch ?? "?"}: ` +
+          ado.pullRequestWebUrl(repoLabel, pr.pullRequestId),
+        "",
+        threads.length ? `${threads.length} thread${threads.length === 1 ? "" : "s"}:` : "No comment threads.",
+      ];
+      for (const t of threads) {
+        const where = t.filePath ? ` on ${t.filePath}${t.line ? ` line ${t.line}` : ""}` : "";
+        lines.push("", `Thread ${t.id} (${t.status})${where}:`);
+        for (const c of t.comments) lines.push(`- ${c.author || "Someone"}: ${c.content}`);
+      }
+      return {
+        content: lines.join("\n"),
+        data: { ...prData(ado, repoLabel, pr, false), threads },
+      };
+    },
+
+    async [TOOL_NAMES.postPullRequestComment](caller, params, ado) {
+      const text = requiredText(params.text, "text").trim();
+      const threadId = params.threadId === undefined || params.threadId === null ? null : positiveInt(params.threadId, "threadId");
+      const status = threadStatusParam(params.status);
+      const filePath = optionalText(params.filePath, "filePath")?.trim() ?? null;
+      const line = params.line === undefined || params.line === null ? null : positiveInt(params.line, "line");
+      if (threadId && (filePath || line)) throw new ToolFailure("filePath and line are only for a new thread; leave them out when replying with threadId.");
+      if (line && !filePath) throw new ToolFailure("line needs filePath.");
+      const pr = await findPullRequest(ado, params);
+      if (pr.status && pr.status !== "active") {
+        throw new ToolFailure(`Pull request ${pr.pullRequestId} is ${pr.status}, so nothing was posted. Comment on the work item instead.`);
+      }
+      const content = signPrText(caller.agentName, text);
+      const workItemId = await runWorkItemId(caller.run);
+      const repoLabel = pr.repositoryName || pr.repositoryId;
+      if (threadId) {
+        const reply = await withNotFound(
+          ado.addPullRequestThreadComment(pr.repositoryId, pr.pullRequestId, threadId, content),
+          `Thread ${threadId} was not found on pull request ${pr.pullRequestId}. Read the threads with ado_get_pr_threads.`,
+        );
+        if (status) await ado.updatePullRequestThreadStatus(pr.repositoryId, pr.pullRequestId, threadId, status);
+        await audit(caller, "pull_request_replied", workItemId, `replied on thread ${threadId} of PR ${pr.pullRequestId}`, {
+          repositoryId: pr.repositoryId,
+          pullRequestId: pr.pullRequestId,
+          threadId,
+          ...(status ? { status } : {}),
+        });
+        return {
+          content: `Replied on thread ${threadId} of pull request ${pr.pullRequestId}${status ? ` and set it ${status}` : ""}.`,
+          data: { pullRequestId: pr.pullRequestId, repositoryId: pr.repositoryId, threadId, commentId: reply.commentId, ...(status ? { status } : {}) },
+        };
+      }
+      const created = await ado.createPullRequestThread(pr.repositoryId, pr.pullRequestId, {
+        content,
+        status: status ?? "active",
+        filePath,
+        line,
+      });
+      await audit(caller, "pull_request_thread_created", workItemId, `started thread ${created.threadId} on PR ${pr.pullRequestId}`, {
+        repositoryId: pr.repositoryId,
+        pullRequestId: pr.pullRequestId,
+        threadId: created.threadId,
+        status: status ?? "active",
+        ...(filePath ? { filePath, line } : {}),
+      });
+      return {
+        content:
+          `Started thread ${created.threadId} (${status ?? "active"}) on pull request ${pr.pullRequestId}` +
+          `${filePath ? ` on ${filePath}${line ? ` line ${line}` : ""}` : ""}: ${ado.pullRequestWebUrl(repoLabel, pr.pullRequestId)}`,
+        data: { pullRequestId: pr.pullRequestId, repositoryId: pr.repositoryId, threadId: created.threadId, commentId: created.commentId, status: status ?? "active" },
+      };
+    },
+
+    async [TOOL_NAMES.getWorkflow](caller) {
+      const tools = Object.fromEntries(Object.entries(ROLE_POLICIES).map(([role, p]) => [role, [...p.tools]]));
+      const data = { you: { agent: caller.agentName, role: caller.role }, ...workflowData(), tools };
+      const content =
+        `You are ${caller.agentName}, ADO role ${caller.role}.\n\n${workflowText()}\n\nTools by role:\n` +
+        Object.entries(tools)
+          .map(([role, list]) => `- ${role}: ${list.join(", ")}`)
+          .join("\n");
+      return { content, data };
     },
   };
 
@@ -308,6 +722,8 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
         };
       }
       const params = (rawParams && typeof rawParams === "object" ? rawParams : {}) as Params;
+      // The rules and assignments need no ADO connection (assigning reads the item itself when it must).
+      if (tool === TOOL_NAMES.getWorkflow) return await handlers[tool](caller, params, null as never);
       const ado = await deps.adoClient(run.companyId).catch((err) => {
         throw new ToolFailure(`Azure DevOps is not available: ${errorText(err)}`);
       });
@@ -317,7 +733,7 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
     }
 
     function failureMessage(err: unknown): string {
-      if (err instanceof ToolFailure) return err.message;
+      if (err instanceof ToolFailure || err instanceof BacklogError) return err.message;
       if (err instanceof AdoError) {
         if (err.status === 429) {
           return "ADO is throttling requests from the shared service account. Try again later (in a few minutes); do not retry straight away.";
@@ -364,6 +780,29 @@ export function registerAgentTools(deps: PluginDeps, links: LinkFeatures): Agent
   };
 }
 
+function denial(decision: { ok: boolean; reason?: string }): string {
+  return `${decision.reason ?? "Not allowed by the workflow."} Read the rules with ado_get_workflow.`;
+}
+
+function assignedMeta(target: Agent, result: AssignDetails): Record<string, unknown> {
+  return {
+    targetAgentId: target.id,
+    targetAgentName: target.name,
+    issueId: result.issueId,
+    created: result.created,
+    changed: result.changed,
+    previousAgentId: result.previousAgentId,
+    ...(result.created ? { parentIssueId: result.parentIssueId, projectId: result.projectId } : {}),
+  };
+}
+
+/** Types of the Agile process that have Microsoft.VSTS.Common.AcceptanceCriteria. */
+const ACCEPTANCE_CRITERIA_TYPES = new Set(["epic", "feature", "user story"]);
+
+function typeHasAcceptanceCriteria(type: string): boolean {
+  return ACCEPTANCE_CRITERIA_TYPES.has(type.trim().toLowerCase());
+}
+
 function inherit(parent: AdoWorkItem, field: string): JsonPatchOp[] {
   const value = parent.fields[field];
   return typeof value === "string" && value ? [{ op: "add", path: `/fields/${field}`, value }] : [];
@@ -376,6 +815,31 @@ async function withNotFound<T>(promise: Promise<T>, message: string): Promise<T>
     if (err instanceof AdoError && err.status === 404) throw new ToolFailure(message);
     throw err;
   }
+}
+
+/**
+ * Rounds of changes a Review has asked for since it last approved: its moves
+ * to Changes Requested after its latest move to Approved. A Defect fix after
+ * an approval starts the count again.
+ */
+export function countReviewRounds(updates: AdoWorkItemUpdate[]): number {
+  let rounds = 0;
+  for (const u of updates) {
+    const state = u.fields["System.State"];
+    if (!state || typeof state.newValue !== "string") continue;
+    const to = state.newValue.toLowerCase();
+    if (to === CHANGES_REQUESTED_STATE.toLowerCase()) rounds++;
+    else if (to === APPROVED_STATE.toLowerCase()) rounds = 0;
+  }
+  return rounds;
+}
+
+/** The ADO parent of an item, from System.Parent or its parent link. */
+export function parentIdOf(item: AdoWorkItem): number | null {
+  const field = Number(item.fields["System.Parent"]);
+  if (Number.isInteger(field) && field > 0) return field;
+  const rel = (item.relations ?? []).find((r) => r.rel === "System.LinkTypes.Hierarchy-Reverse");
+  return rel ? idFromUrl(rel.url) : null;
 }
 
 function idFromUrl(url: string): number | null {
@@ -427,6 +891,7 @@ export function describeWorkItem(item: AdoWorkItem, url: string) {
     storyPoints: f["Microsoft.VSTS.Scheduling.StoryPoints"] ?? null,
     description: text("System.Description"),
     acceptanceCriteria: text("Microsoft.VSTS.Common.AcceptanceCriteria"),
+    technicalNotes: text("Custom.TechnicalNotes"),
     reproSteps: text("Microsoft.VSTS.TCM.ReproSteps"),
     parent,
     children,
@@ -434,6 +899,40 @@ export function describeWorkItem(item: AdoWorkItem, url: string) {
     pullRequests,
     otherLinks,
   };
+}
+
+function prData(ado: AdoClient, repository: string, pr: AdoPullRequest, created: boolean) {
+  return {
+    pullRequestId: pr.pullRequestId,
+    repositoryId: pr.repositoryId,
+    repository,
+    title: pr.title,
+    status: pr.status,
+    sourceBranch: pr.sourceBranch,
+    targetBranch: pr.targetBranch,
+    url: ado.pullRequestWebUrl(repository, pr.pullRequestId),
+    created,
+  };
+}
+
+/** A branch name, without refs/heads/. */
+function branchParam(value: unknown, name: string): string {
+  const branch = requiredText(value, name).trim().replace(/^refs\/heads\//, "");
+  if (!branch || /\s/.test(branch)) throw new ToolFailure(`${name} must be a branch name with no spaces, for example "ai/827-hello-world".`);
+  return branch;
+}
+
+function threadStatusParam(value: unknown): PrThreadStatus | null {
+  if (value === undefined || value === null || value === "") return null;
+  const match = PR_THREAD_STATUSES.find((st) => typeof value === "string" && st.toLowerCase() === value.trim().toLowerCase());
+  if (!match) throw new ToolFailure(`status must be one of ${PR_THREAD_STATUSES.join(", ")}.`);
+  return match;
+}
+
+/** Pull request comments carry the agent's name in front, like work item comments, so others can tell agents apart. */
+export function signPrText(agentName: string, text: string): string {
+  const tag = `[${agentName}]`;
+  return text.trimStart().toLowerCase().startsWith(tag.toLowerCase()) ? text : `${tag} ${text}`;
 }
 
 function positiveInt(value: unknown, name: string): number {

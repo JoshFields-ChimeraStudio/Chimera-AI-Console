@@ -2935,6 +2935,9 @@ export function createToolGatewayService(
         connectionId: input.tool.connectionId ?? null,
         catalogEntryId: input.tool.catalogEntryId ?? null,
         providerType: input.tool.providerType,
+        // Chimera fork: identifies the providing plugin, so the policy can
+        // allow tools of shipped plugins by default (allow_shipped_plugin).
+        pluginId: input.tool.providerType === "paperclip_plugin" ? input.tool.pluginId ?? null : null,
         upstreamToolName: input.tool.upstreamToolName ?? input.tool.name,
         riskLevel: input.tool.risk,
         arguments: input.parameters ?? {},

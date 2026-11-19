@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Inbox, Boxes, ChevronRight, CircleCheck, FolderOpen, History, LayoutDashboard, MessageCircle, MoreHorizontal, Network, Pin, PinOff, Plus, Repeat, Search, Settings, SquarePen, Unplug, type LucideIcon } from "lucide-react";
+import { Inbox, Boxes, ChevronRight, CircleCheck, FolderOpen, History, LayoutDashboard, ListTree, MessageCircle, MoreHorizontal, Network, Pin, PinOff, Plus, Repeat, Search, Settings, SquarePen, Unplug, type LucideIcon } from "lucide-react";
 import type { Agent, Project } from "@paperclipai/shared";
 import { useCoordinatorAttentionCount } from "@/hooks/useCoordinatorAttentionCount";
 import { issuesApi } from "@/api/issues";
@@ -8,6 +8,7 @@ import { instanceSettingsApi } from "@/api/instanceSettings";
 import { projectsApi } from "@/api/projects";
 import { useAgentChatNavigation } from "@/hooks/useAgentChatNavigation";
 import { useRecentTasks } from "@/hooks/useRecentTasks";
+import { useAdoPlugin } from "@/hooks/useBacklog";
 import { usePinnedNavigation } from "@/hooks/usePinnedNavigation";
 import { useDialogActions } from "@/context/DialogContext";
 import { useSidebar } from "@/context/SidebarContext";
@@ -122,6 +123,7 @@ export function CoordinatorSidebar({ children }: { children?: ReactNode }) {
   const { openNewIssue } = useDialogActions();
   const location = useLocation();
   const attentionCount = useCoordinatorAttentionCount(companyId);
+  const showBacklog = useAdoPlugin().plugin !== null;
   const { data: projects } = useQuery({ queryKey: queryKeys.projects.list(companyId!), queryFn: () => projectsApi.list(companyId!), enabled: !!companyId });
   // Only project IDs and visit times are kept in memory. Labels and task lists
   // always come from the authorized API, scoped to the current person/company.
@@ -163,6 +165,7 @@ export function CoordinatorSidebar({ children }: { children?: ReactNode }) {
             {!rail && <button type="button" aria-label="New task" title="New task" onClick={() => openNewIssue()}
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity group-hover/coordinator-new:opacity-100 group-focus-within/coordinator-new:opacity-100 pointer-coarse:opacity-100 hover:bg-sidebar-accent focus-visible:ring-2 focus-visible:ring-ring"><Plus className="size-4" /></button>}
           </div>
+          {showBacklog ? <SidebarNavItem className="design-sidebar-item" to="/backlog" label="Backlog" icon={ListTree} /> : null}
           <SidebarNavItem className="design-sidebar-item" to="/decisions" label="Inbox" icon={Inbox} badge={attentionCount} badgeLabel="decisions" />
         </div>
         <Flyout open={moreOpen} onOpenChange={setMoreOpen}>

@@ -736,6 +736,13 @@ export const queryKeys = {
       ["plugins", pluginId, "dashboard"] as const,
     logs: (pluginId: string) => ["plugins", pluginId, "logs"] as const,
   },
+  /** ADO Backlog view (data from the ADO plugin through the plugin bridge). */
+  backlog: {
+    all: (companyId: string) => ["backlog", companyId] as const,
+    list: (companyId: string) => ["backlog", companyId, "list"] as const,
+    workItem: (companyId: string, workItemId: number) =>
+      ["backlog", companyId, "work-item", workItemId] as const,
+  },
   adapters: {
     all: ["adapters"] as const,
     availability: (companyId: string | null, environmentId?: string | null) =>

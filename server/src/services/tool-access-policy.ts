@@ -1,5 +1,6 @@
 import type { ConnectionManagementContext } from "./connection-management.js";
 import { createHash } from "node:crypto";
+import path from "node:path";
 import { boundRunIssueIdSql } from "./run-task-binding.js";
 import type { ToolApprovalClaim } from "./tool-approval-execution.js";
 import { and, asc, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
@@ -8,6 +9,7 @@ import {
   agents,
   heartbeatRuns,
   issues,
+  plugins,
   principalPermissionGrants,
   projects,
   routines,
@@ -52,6 +54,7 @@ import {
   profileIdsInBindingOrder,
 } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure } from "./tool-runtime-metrics.js";
+import { isTrustedShippedPluginRecord, shippedPluginKeys } from "./shipped-plugins.js";
 import { canonicalToolArguments, readSignedToolArgumentsPayload, toolRequestIdentityHash } from "./tool-content-guards.js";
 
 class RejectedInvocationAdmission extends Error {
@@ -1669,7 +1672,50 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       }
     }
 
+    // Chimera fork: tools of shipped plugins (scripts/shipped-plugins.json) are
+    // allowed for agents by default. Blocks, require-approval policies and
+    // allow rules above have already had their say; a matching profile exclude
+    // entry still wins. The plugin enforces its own per-agent permissions.
+    const shippedPluginKey = await shippedPluginKeyForRequest(input, ctx, cache);
+    if (shippedPluginKey) {
+      const excluded = profileState.entries.some((entry) =>
+        entry.effect === "exclude" && effectiveProfileIds.includes(entry.profileId) && profileEntryMatches(entry, ctx));
+      if (!excluded) {
+        return decision(
+          "allow",
+          "allow_shipped_plugin",
+          `Tool access allowed by default: ${shippedPluginKey} ships with this server, and the plugin applies its own per-agent permissions.`,
+          effectiveProfileIds,
+          [],
+          { redactionPlan: redaction.redactionPlan },
+        );
+      }
+    }
+
     return decision("deny", "deny_default", "No effective tool profile, grant, or allow policy permits this call.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
+  }
+
+  /**
+   * Chimera fork: the plugin key when an agent calls a tool of a shipped plugin
+   * that is installed and ready, else null. The providing plugin is the
+   * request's `pluginId` (its database id); the tool name must also be in that
+   * plugin's namespace.
+   */
+  async function shippedPluginKeyForRequest(
+    input: ToolAccessDecisionInput,
+    ctx: ToolAccessContext,
+    cache: ToolAccessDecisionCache | undefined,
+  ): Promise<string | null> {
+    if (ctx.actorType !== "agent" || !ctx.agentId || ctx.providerType !== "paperclip_plugin") return null;
+    const pluginId = nonBlankString(input.request.pluginId);
+    const shipped = shippedPluginKeys();
+    if (!pluginId || shipped.size === 0 || !CANONICAL_UUID_RE.test(pluginId)) return null;
+    const [plugin] = await cachedRead(cache, `plugin:${pluginId}`, async () =>
+      db.select({ pluginKey: plugins.pluginKey, status: plugins.status, packagePath: plugins.packagePath }).from(plugins).where(eq(plugins.id, pluginId)));
+    // Only the copy that ships with this server is trusted, not another package
+    // installed by hand under the same key while the server runs.
+    if (!plugin || !shipped.has(plugin.pluginKey) || !isTrustedShippedPluginRecord(plugin)) return null;
+    return ctx.toolName.startsWith(`${plugin.pluginKey}:`) ? plugin.pluginKey : null;
   }
 
   async function writeAudit(

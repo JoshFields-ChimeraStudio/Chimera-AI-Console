@@ -7,12 +7,27 @@ import { ACTION_KEYS, DATA_KEYS } from "./manifest.js";
 import type { PluginDeps } from "./deps.js";
 import { registerLinkFeatures, type LinkFeatures } from "./links/index.js";
 import type { LinkRepository } from "./links/repository.js";
+import { orgName } from "./links/index.js";
 import { registerAgentTools, type AgentTools } from "./tools/index.js";
+import { registerBacklogFeatures, type BacklogFeatures, type LastFullSync, type SyncStartResult } from "./backlog/index.js";
+import { notifyBacklogChanged } from "./backlog/notify.js";
+import { createPullRequestNotifier, type PullRequestNotifier } from "./pullrequests/index.js";
+import { createWorkItemWatcher, type WorkItemWatcher } from "./watch/index.js";
+import type { WorkItemCacheRepository } from "./backlog/repository.js";
 
 /** How far back the very first catch-up looks when there is no watermark yet. */
 const FIRST_SYNC_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
 /** Overlap between catch-ups so clock skew between us and ADO cannot open a gap. */
 const WATERMARK_OVERLAP_MS = 60 * 1000;
+/**
+ * A full sync keeps cached rows written less than this long before it started, even
+ * when ADO did not return them: ASOF uses our clock, and a few minutes of skew against
+ * ADO could otherwise drop an item created just before the sync. Such an item, if it
+ * really is gone, is removed by the next full sync.
+ */
+const FULL_SYNC_DELETE_MARGIN_MS = 5 * 60 * 1000;
+/** Where a full sync starts: the beginning of time, so every item of the project is read. */
+const FULL_SYNC_SINCE = new Date(0);
 /** Work items per catch-up page; WIQL refuses more than 20,000 in one query. */
 const SYNC_PAGE_SIZE = 5000;
 /**
@@ -24,6 +39,8 @@ const PAT_CACHE_MS = 60 * 1000;
 /** Wait before handing a failed message back: 10 s per attempt, capped below the 1-minute lock. */
 const RETRY_DELAY_STEP_MS = 10_000;
 const RETRY_DELAY_MAX_MS = 50_000;
+/** Plugin state key of the last full sync (Backlog view). */
+const FULL_SYNC_STATE_KEY = "last-full-sync";
 /** Attempts to list companies when restoring listeners after a crash restart. */
 const RECOVERY_ATTEMPTS = 5;
 
@@ -111,6 +128,8 @@ export interface AdoPluginOptions {
   recoveryDelayMs?: number;
   /** Link storage; tests pass an in-memory one because the test harness has no database. */
   linkRepository?: (ctx: PluginContext) => LinkRepository;
+  /** Work item cache storage (Backlog view); tests pass an in-memory one. */
+  workItemCacheRepository?: (ctx: PluginContext) => WorkItemCacheRepository;
 }
 
 export function createAdoPlugin(options: AdoPluginOptions = {}) {
@@ -125,6 +144,9 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
   let ctx: PluginContext | null = null;
   let links: LinkFeatures | null = null;
   let tools: AgentTools | null = null;
+  let backlog: BacklogFeatures | null = null;
+  let pullRequests: PullRequestNotifier | null = null;
+  let watcher: WorkItemWatcher | null = null;
 
   function runtime(companyId: string): CompanyRuntime {
     let rt = runtimes.get(companyId);
@@ -162,11 +184,28 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
 
   /**
    * The one place a changed work item is handled, whether it came from a live
-   * event or from a catch-up. A2 refreshes linked tasks here; A3 adds creating them.
+   * event, a catch-up, a full sync or a read on the work item page. The Backlog
+   * cache row is upserted (never to an older rev), and A2 refreshes linked tasks.
    */
   async function processWorkItem(c: PluginContext, companyId: string, item: WorkItemSummary, source: string): Promise<void> {
-    c.logger.info("ADO work item changed", { companyId, source, workItemId: item.id, type: item.type, state: item.state, rev: item.rev });
+    // A full sync handles every item of the project: log those at debug, and one summary line at the end.
+    const log = source === "sync:full" ? c.logger.debug.bind(c.logger) : c.logger.info.bind(c.logger);
+    log("ADO work item changed", { companyId, source, workItemId: item.id, type: item.type, state: item.state, rev: item.rev });
+    // The link as it was before this change: the watcher's starting point for an item it has not seen yet.
+    const before = links ? await links.findLinkByWorkItem(companyId, item.id) : null;
+    await backlog?.onWorkItemChanged(companyId, item, source);
     await links?.onWorkItemChanged(companyId, item, source);
+    // Linked items always; an item with no linked task only on a live event, for its parent's owner (a sync would replay old changes).
+    if (watcher && (before || !source.startsWith("sync:"))) {
+      const config = await c.config.get(companyId);
+      if (isConfigured(config)) {
+        const baseline = before ? { rev: before.rev, syncedAt: before.syncedAt } : null;
+        const out = await watcher.onWorkItemChanged(companyId, await adoClient(c, companyId, config), item, baseline);
+        if (out.notified.length || out.closed) c.logger.info("Linked task updated from ADO", { companyId, workItemId: item.id, ...out });
+      }
+    }
+    // Catch-ups and full syncs announce once when they finish, not per item.
+    if (!source.startsWith("sync:")) notifyBacklogChanged(c, companyId, { reason: "work-item", workItemId: item.id });
   }
 
   function makeDeps(c: PluginContext): PluginDeps {
@@ -206,14 +245,15 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       if (event.target.kind === "workitem") {
         const ado = await adoClient(c, companyId, config);
         const item = await ado.getWorkItemSummary(event.target.workItemId);
-        // Our own write echoing back (loop prevention for A4).
-        if (config.serviceAccountName && item.changedBy === config.serviceAccountName) return { outcome: "complete" };
+        // Agents' writes (by the service account) are handled too: one agent's change can be another agent's news.
+        // The plugin itself writes nothing to ADO in response, so this cannot loop.
         record.workItem = item;
         await processWorkItem(c, companyId, item, event.target.eventType);
       } else if (event.target.kind === "pullrequest") {
         record.pullRequestId = event.target.pullRequestId;
-        c.logger.info("ADO pull request event", { eventType: event.target.eventType, pullRequestId: event.target.pullRequestId });
-        // A5 hook point.
+        const ado = await adoClient(c, companyId, config);
+        const out = await pullRequests!.onPullRequestEvent(companyId, ado, event.target);
+        c.logger.info("ADO pull request event", { eventType: event.target.eventType, ...out });
       } else {
         // Also hit if a payload carries no usable id: worth a warning, not silence.
         c.logger.warn("Ignoring ADO event", { eventType: event.target.eventType, eventId: event.eventId });
@@ -230,6 +270,10 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
           await links?.onWorkItemMissing?.(companyId, workItemId, event.target.eventType).catch((e) =>
             c.logger.warn("Could not mark ADO link as missing", { workItemId, error: errorText(e) }),
           );
+          await backlog?.onWorkItemMissing(companyId, workItemId).catch((e) =>
+            c.logger.warn("Could not drop a missing ADO work item from the cache", { workItemId, error: errorText(e) }),
+          );
+          notifyBacklogChanged(c, companyId, { reason: "work-item", workItemId });
         }
         return { outcome: "complete" };
       }
@@ -316,36 +360,58 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
     return serialize(companyId, () => applyConfigNow(c, companyId, config));
   }
 
-  async function runSync(c: PluginContext, companyId: string, trigger: LastSyncRecord["trigger"]): Promise<LastSyncRecord | null> {
+  /**
+   * The catch-up (trigger "startup" or "manual") and the full sync (trigger "full",
+   * the Backlog view's Sync button) share this loop and the company's one `syncing`
+   * flag, so only one of them runs at a time.
+   *
+   * The catch-up reads items changed since the watermark and moves the watermark
+   * forward as it goes. The full sync reads every item from the beginning of time,
+   * never moves the watermark backwards while paging, and on success deletes the
+   * cached rows ADO did not return and moves the watermark to the start time less
+   * the overlap, if that is later: everything changed before the start has then been
+   * handled, so the next catch-up need not look further back. A failed full sync
+   * deletes nothing and leaves the watermark alone.
+   */
+  async function runSync(c: PluginContext, companyId: string, trigger: LastSyncRecord["trigger"] | "full"): Promise<LastSyncRecord | null> {
     const rt = runtime(companyId);
     if (rt.syncing) return null;
     rt.syncing = true;
+    notifyBacklogChanged(c, companyId, { reason: "sync" });
+    const full = trigger === "full";
     const startedAt = now();
     const scope = { scopeKind: "company" as const, scopeId: companyId };
-    let since = new Date(startedAt - FIRST_SYNC_LOOKBACK_MS);
+    let since = full ? FULL_SYNC_SINCE : new Date(startedAt - FIRST_SYNC_LOOKBACK_MS);
     const record: LastSyncRecord = {
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: "",
-      trigger,
+      trigger: trigger as LastSyncRecord["trigger"],
       since: since.toISOString(),
       changed: 0,
     };
+    let removed = 0;
     try {
       const config = await c.config.get(companyId);
       if (!isConfigured(config)) throw new Error("The plugin is not configured for this company");
       const watermark = await c.state.get({ ...scope, stateKey: "sync-watermark" });
-      if (typeof watermark === "string" && !Number.isNaN(Date.parse(watermark))) since = new Date(watermark);
+      const watermarkDate = typeof watermark === "string" && !Number.isNaN(Date.parse(watermark)) ? new Date(watermark) : null;
+      if (!full && watermarkDate) since = watermarkDate;
       record.since = since.toISOString();
 
       const ado = await adoClient(c, companyId, config);
+      // The org and project this run reads; deletion is skipped if the settings change meanwhile.
+      const runKey = { org: orgName(config.orgUrl), project: config.project };
+      /** IDs the WIQL pages returned: a full sync deletes only cached items not among them. */
+      const seen = new Set<number>();
       // Page by change date so a large backlog makes progress and never hits the WIQL limit.
-      // Every page reads ADO as it was when the catch-up started, so an edit made during the
-      // catch-up cannot push the next page's start date forward and skip items. Such edits
+      // Every page reads ADO as it was when the sync started, so an edit made during the
+      // sync cannot push the next page's start date forward and skip items. Such edits
       // arrive as live events, and the final watermark (start time less the overlap) covers them.
       const asOf = new Date(startedAt);
       for (;;) {
         const ids = await ado.queryChangedSince(since, SYNC_PAGE_SIZE, asOf);
         const items = await ado.getWorkItemSummaries(ids, asOf);
+        if (full) for (const id of ids) seen.add(id);
         for (const item of items) {
           await processWorkItem(c, companyId, item, `sync:${trigger}`);
           record.changed++;
@@ -355,21 +421,66 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
         // Step back 1 ms (dates compare to the millisecond) so items sharing the boundary
         // timestamp are not skipped; handling one twice is harmless.
         const next = new Date(newest - 1);
-        if (!Number.isFinite(newest) || next <= since) throw new Error("Catch-up could not move past " + since.toISOString());
+        if (!Number.isFinite(newest) || next <= since) throw new Error("Sync could not move past " + since.toISOString());
         since = next;
-        await c.state.set({ ...scope, stateKey: "sync-watermark" }, since.toISOString());
+        if (!full) await c.state.set({ ...scope, stateKey: "sync-watermark" }, since.toISOString());
       }
-      await c.state.set({ ...scope, stateKey: "sync-watermark" }, new Date(startedAt - WATERMARK_OVERLAP_MS).toISOString());
-      c.logger.info("ADO catch-up finished", { companyId, trigger, changed: record.changed });
+      const finalWatermark = new Date(startedAt - WATERMARK_OVERLAP_MS);
+      if (full) {
+        // Deletion depends on which IDs ADO returned, not on clocks. The write-time guard (with a
+        // margin for clock skew between us and ADO) only keeps rows live events wrote around the start.
+        const current = await backlog?.projectKey(companyId);
+        let gone: number[] = [];
+        if (!current || current.org !== runKey.org || current.project !== runKey.project) {
+          c.logger.warn("ADO full sync: the organization or project setting changed during the sync; nothing was deleted", { companyId });
+        } else {
+          const writtenBefore = new Date(startedAt - FULL_SYNC_DELETE_MARGIN_MS).toISOString();
+          gone = (await backlog?.removeNotSeen(companyId, runKey, seen, writtenBefore)) ?? [];
+        }
+        removed = gone.length;
+        for (const id of gone) {
+          await links?.onWorkItemMissing?.(companyId, id, "sync:full").catch((e) =>
+            c.logger.warn("Could not mark ADO link as missing", { workItemId: id, error: errorText(e) }),
+          );
+        }
+      }
+      if (!full || !watermarkDate || watermarkDate < finalWatermark) {
+        await c.state.set({ ...scope, stateKey: "sync-watermark" }, finalWatermark.toISOString());
+      }
+      c.logger.info(full ? "ADO full sync finished" : "ADO catch-up finished", { companyId, trigger, changed: record.changed, removed });
     } catch (err) {
       record.error = errorText(err);
-      c.logger.error("ADO catch-up failed", { companyId, trigger, error: record.error });
+      c.logger.error(full ? "ADO full sync failed" : "ADO catch-up failed", { companyId, trigger, error: record.error });
     } finally {
       record.finishedAt = new Date(now()).toISOString();
       rt.syncing = false;
-      await c.state.set({ ...scope, stateKey: "last-sync" }, record).catch(() => {});
+      if (full) {
+        const fullRecord: LastFullSync = {
+          startedAt: record.startedAt,
+          finishedAt: record.finishedAt,
+          trigger,
+          changed: record.changed,
+          removed,
+          ...(record.error ? { error: record.error } : {}),
+        };
+        await c.state.set({ ...scope, stateKey: FULL_SYNC_STATE_KEY }, fullRecord).catch(() => {});
+      } else {
+        await c.state.set({ ...scope, stateKey: "last-sync" }, record).catch(() => {});
+      }
+      // After the sync record is saved, so the page reads the new "last sync" too.
+      notifyBacklogChanged(c, companyId, { reason: "sync" });
     }
     return record;
+  }
+
+  async function startFullSync(c: PluginContext, companyId: string): Promise<SyncStartResult> {
+    if (!isConfigured(await c.config.get(companyId).catch(() => ({})))) {
+      return { started: false, reason: "The Azure DevOps plugin is not configured for this company" };
+    }
+    if (runtime(companyId).syncing) return { started: false, reason: "A sync is already running" };
+    // In the background: actions time out after 30 s, and a full sync takes longer.
+    void inBackground(() => runSync(c, companyId, "full"));
+    return { started: true };
   }
 
   /**
@@ -421,7 +532,50 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       ctx = c;
       const deps = makeDeps(c);
       links = registerLinkFeatures(deps, options.linkRepository?.(c));
-      tools = registerAgentTools(deps, links);
+      backlog = registerBacklogFeatures(deps, links, {
+        repo: options.workItemCacheRepository?.(c),
+        processWorkItem: (companyId, item, source) => processWorkItem(c, companyId, item, source),
+        startFullSync: (companyId) => startFullSync(c, companyId),
+        async syncStatus(companyId) {
+          const lastSync = await c.state.get({ scopeKind: "company", scopeId: companyId, stateKey: FULL_SYNC_STATE_KEY });
+          return { syncing: runtime(companyId).syncing, lastSync: (lastSync as LastFullSync | null) ?? null };
+        },
+      });
+      // The agents' assignment tool shares the Backlog view's assignment path.
+      tools = registerAgentTools(deps, links, backlog.assigner);
+      // Pull request completed, abandoned or commented on: tell and wake the agent on the linked task.
+      pullRequests = createPullRequestNotifier({ ctx: c, findTaskForWorkItem: links.findTaskForWorkItem });
+      // ADO drives the linked task: it stays open until the work item is final, and others' changes wake its agent.
+      watcher = createWorkItemWatcher({
+        ctx: c,
+        findTaskForWorkItem: links.findTaskForWorkItem,
+        async serviceAccountName(companyId) {
+          return (await deps.settings(companyId))?.serviceAccountName ?? null;
+        },
+      });
+
+      // A linked task's status or agent shows on its Backlog row, so tell the page when
+      // one changes. Only tasks linked to ADO, and only a "changed" signal is sent.
+      c.events.on("issue.updated", async (event) => {
+        const issueId = event.entityId;
+        if (!issueId || !event.companyId || !links) return;
+        const link = await links.findLinkByIssue(event.companyId, issueId).catch(() => null);
+        if (!link) return;
+        notifyBacklogChanged(c, event.companyId, { reason: "task", workItemId: link.workItemId });
+        // A linked task marked done while its work item is still open in ADO goes back to waiting.
+        const task = await c.issues.get(issueId, event.companyId).catch(() => null);
+        if (task?.status !== "done" || !watcher) return;
+        try {
+          const config = await c.config.get(event.companyId);
+          if (!isConfigured(config)) return;
+          const live = await (await adoClient(c, event.companyId, config)).getWorkItemSummary(link.workItemId);
+          if (await watcher.onTaskClosed(event.companyId, task, live.state)) {
+            c.logger.info("Reopened a task closed before its work item", { companyId: event.companyId, issueId, workItemId: link.workItemId, state: live.state });
+          }
+        } catch (err) {
+          c.logger.warn("Could not check a closed task against ADO", { companyId: event.companyId, issueId, error: errorText(err) });
+        }
+      });
 
       c.data.register(DATA_KEYS.status, async (params): Promise<AdoStatus> => {
         const companyId = companyIdFrom(params);

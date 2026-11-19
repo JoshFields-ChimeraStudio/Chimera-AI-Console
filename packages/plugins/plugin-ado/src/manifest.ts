@@ -16,10 +16,15 @@ const manifest: PaperclipPluginManifestV1 = {
     "Listens for Azure DevOps service hook events on an Azure Service Bus queue and keeps tasks in step with ADO work items.",
   author: "Chimera Studio",
   categories: ["connector"],
-  // A1 skeleton, A2 links (issues.*, database.namespace.*, ui.action.register) and
-  // A8 agent tools (agent.tools.register, agents.read for role names, activity log).
+  // A1 skeleton, A2 links (issues.*, database.namespace.*, ui.action.register),
+  // A8 agent tools (agent.tools.register, agents.read for role names, activity log) and
+  // the Backlog view (issues.create for the linked task, issues.wakeup because the plugin
+  // issue API does not wake the assignee by itself, events.subscribe so the page hears of linked
+  // task changes; live page updates use the plugin stream, which needs no capability), and the
+  // agents' assignment tool (issue.comments.create for its optional note on the linked task).
   capabilities: [
     "companies.read",
+    "events.subscribe",
     "http.outbound",
     "secrets.read-ref",
     "plugin.state.read",
@@ -30,6 +35,9 @@ const manifest: PaperclipPluginManifestV1 = {
     "activity.log.write",
     "issues.read",
     "issues.update",
+    "issues.create",
+    "issues.wakeup",
+    "issue.comments.create",
     "database.namespace.migrate",
     "database.namespace.read",
     "database.namespace.write",
@@ -83,8 +91,10 @@ const manifest: PaperclipPluginManifestV1 = {
         type: "array",
         title: "Agent roles for ADO tools",
         description:
-          "Which ADO tools each agent may use. readonly: read work items. builder: read, comment, set state, link PRs, create Task/Bug children. " +
-          "reviewer: read, comment, set state. planner: everything, any child type. Agents not listed are readonly. To hand a name to a different agent, remove the entry, save, and add it again.",
+          "Each agent's ADO role: director (Epic, Documentation, assigning approved work, roll-ups), planner (the plan and the work item tree), architect (technical notes, Ready For Approval), " +
+          "builder (its own Stories, Bugs, Documents, Tasks and Defects), reviewer (its own Review items), qa (its own QA Test items and the Defects it finds), readonly (read only). " +
+          "The agents read the full rules with the ado_get_workflow tool. " +
+          "Agents not listed are readonly. To hand a name to a different agent, remove the entry, save, and add it again.",
         items: {
           type: "object",
           properties: {

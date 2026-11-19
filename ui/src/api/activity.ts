@@ -37,6 +37,13 @@ export interface RunForIssue {
   wakeCommentId?: string | null;
   contextCommentId?: string | null;
   contextIssueId?: string | null;
+  /** The agent session the run used (native session id, else the adapter's). */
+  sessionId?: string | null;
+  /** Why the run started a fresh session instead of resuming the task's saved one; null when it resumed. */
+  sessionStartReason?: string | null;
+  sessionResumedTaskSession?: boolean | null;
+  /** What the provider did: resumed the session, or started a new one (native runs). */
+  sessionEvent?: "started" | "resumed" | null;
   contextSnapshot?: Record<string, unknown> | null;
   environment?: {
     id: string;

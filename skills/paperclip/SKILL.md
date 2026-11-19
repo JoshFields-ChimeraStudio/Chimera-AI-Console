@@ -748,7 +748,7 @@ If `plan` already exists, first `GET /api/issues/{issueId}/documents/plan` and r
 | Secret proposals                      | `POST\|GET /api/agents/me/secret-proposals` • `DELETE /api/agents/me/secret-proposals/:id`                                  |
 | Dashboard                             | `GET /api/companies/:companyId/dashboard`                                                                                       |
 
-Full endpoint table (company imports/exports, OpenClaw invites, company skills, routines, etc.) lives in `references/api-reference.md`.
+Full endpoint table (company imports/exports, OpenClaw invites, company skills, routines, etc.) lives in `references/api-reference.md`. Plugin tools (for example the Azure DevOps tools `chimera.plugin-ado:*`) are not in your tool list and are not MCP tools: you list and call them through `GET /api/plugins/tools` and `POST /api/plugins/tools/execute`, as `references/plugin-tools.md` describes.
 
 ## Searching Issues
 

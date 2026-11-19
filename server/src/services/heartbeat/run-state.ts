@@ -826,6 +826,34 @@ export function shouldResetTaskSessionForWake(
   return false;
 }
 
+/**
+ * Fork patch (Chimera): why a run starts a fresh session rather than resuming
+ * its task's saved one, in words for the run ledger. Saved on the run as
+ * `contextSnapshot.paperclipSessionStart`.
+ */
+export function describeSessionStart(input: {
+  contextSnapshot: Record<string, unknown> | null | undefined;
+  taskSessionAvailable: boolean;
+  taskSessionReused: boolean;
+  configResetReason: string | null;
+  compaction: { rotate: boolean; reason: string | null };
+}): { resumedTaskSession: boolean; reason: string | null } {
+  if (input.compaction.rotate) {
+    return { resumedTaskSession: false, reason: `the session was rotated: ${input.compaction.reason ?? "it had grown too large"}` };
+  }
+  if (input.taskSessionReused) return { resumedTaskSession: true, reason: null };
+  if (!input.taskSessionAvailable) return { resumedTaskSession: false, reason: "no saved session for this task yet" };
+  const wakeReason = describeSessionResetReason(input.contextSnapshot);
+  if (wakeReason) return { resumedTaskSession: false, reason: wakeReason };
+  if (input.contextSnapshot?.workspaceSelectionChanged === true) {
+    return { resumedTaskSession: false, reason: "the task's workspace selection changed" };
+  }
+  if (input.configResetReason) {
+    return { resumedTaskSession: false, reason: `the agent's configuration changed (${input.configResetReason})` };
+  }
+  return { resumedTaskSession: false, reason: "the saved session could not be reused" };
+}
+
 export function describeSessionResetReason(
   contextSnapshot: Record<string, unknown> | null | undefined,
 ) {

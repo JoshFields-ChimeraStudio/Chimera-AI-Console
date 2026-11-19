@@ -20,6 +20,7 @@ import {
   MessagesSquare,
   GanttChartSquare,
   LayoutGrid,
+  ListTree,
 } from "lucide-react";
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -37,6 +38,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
+import { useAdoPlugin } from "../hooks/useBacklog";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
@@ -49,6 +51,7 @@ export function Sidebar() {
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
   const [workOpen, setWorkOpen] = useState(true);
+  const showBacklog = useAdoPlugin().plugin !== null;
   const [companyOpen, setCompanyOpen] = useState(true);
   const { selectedCompanyId, selectedCompany } = useCompany();
   const { collapsed, peeking } = useSidebar();
@@ -180,6 +183,7 @@ export function Sidebar() {
 
         <SidebarSection label="Work" collapsible={{ open: workOpen, onOpenChange: setWorkOpen }}>
           <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
+          {showBacklog ? <SidebarNavItem to="/backlog" label="Backlog" icon={ListTree} /> : null}
           {showCases ? (
             <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
           ) : null}

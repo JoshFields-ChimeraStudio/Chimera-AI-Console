@@ -19,4 +19,11 @@ describe("shouldQueueFollowupForRunningIssueWake", () => {
       wakeCommentId: null,
     })).toBe(false);
   });
+
+  it("queues a plugin wake behind a running turn instead of merging it", () => {
+    expect(shouldQueueFollowupForRunningIssueWake({
+      contextSnapshot: { wakeReason: "ado_child_changed", pluginId: "plugin-1", source: "ado.work-item" },
+      wakeCommentId: null,
+    })).toBe(true);
+  });
 });

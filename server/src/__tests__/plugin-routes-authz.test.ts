@@ -706,6 +706,51 @@ describe("plugin tool and bridge authz", () => {
     );
   });
 
+  it("takes runContext from an agent's run token when the agent omits it (Chimera fork)", async () => {
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA }],
+        [{ companyId: companyA, agentId: agentA }],
+      ]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent: vi.fn(),
+          getTool: vi.fn(() => ({ name: "paperclip.example:search" })),
+          executeTool,
+        },
+      },
+    });
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({ tool: "paperclip.example:search", parameters: { q: "x" } });
+
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalledWith(
+      "paperclip.example:search",
+      { q: "x" },
+      { agentId: agentA, runId: runA, companyId: companyA, projectId: "" },
+    );
+  });
+
+  it.each([
+    ["a board user", boardActor()],
+    ["an agent key without a run", agentActor({ runId: undefined })],
+  ])("still requires runContext from %s", async (_label, actor) => {
+    const executeTool = vi.fn();
+    const { app } = await createApp(actor, {}, {
+      db: createSelectQueueDb([]),
+      toolDeps: { toolDispatcher: { listToolsForAgent: vi.fn(), getTool: vi.fn(), executeTool } },
+    });
+
+    const res = await request(app).post("/api/plugins/tools/execute").send({ tool: "paperclip.example:search", parameters: {} });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('"runContext" is required and must be an object');
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["missing", {}],
     ["null", { projectId: null }],

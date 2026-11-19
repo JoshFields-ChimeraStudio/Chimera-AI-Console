@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { and, eq } from "drizzle-orm";
+import { setShippedPluginKeysForTest } from "../services/shipped-plugins.js";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -283,6 +284,48 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
         }),
       ]),
     );
+  });
+
+  it("keeps a requested parent at any depth for the shipped copy of a shipped plugin only", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const pluginRecordId = randomUUID();
+    const pluginKey = `chimera.shipped-${pluginRecordId.slice(0, 8)}`;
+    const shippedPath = `/srv/shipped/${pluginKey}`;
+    await db.insert(plugins).values({
+      id: pluginRecordId,
+      pluginKey,
+      packageName: pluginKey,
+      packagePath: shippedPath,
+      version: "0.1.0",
+      status: "ready",
+      manifestJson: { id: pluginKey } as never,
+    });
+    const services = buildHostServices(db, pluginRecordId, pluginKey, createEventBusStub());
+    const tree = async () => {
+      const root = await services.issues.create({ companyId, title: "Feature" });
+      const child = await services.issues.create({ companyId, title: "Story", parentId: root.id });
+      const grandchild = await services.issues.create({ companyId, title: "Review", parentId: child.id });
+      return { root, child, grandchild };
+    };
+    try {
+      setShippedPluginKeysForTest([[pluginKey, shippedPath]]);
+      const nested = await tree();
+      expect(nested.child.parentId).toBe(nested.root.id);
+      expect(nested.grandchild.parentId).toBe(nested.child.id);
+
+      // A same-key package installed from elsewhere is not trusted: the agent rule flattens it.
+      setShippedPluginKeysForTest([[pluginKey, "/srv/someone-else"]]);
+      const flattened = await tree();
+      // (where upstream's agent rule then places it is upstream's business; it is not nested)
+      expect(flattened.grandchild.parentId).not.toBe(flattened.child.id);
+
+      // An unlisted plugin flattens too.
+      setShippedPluginKeysForTest([]);
+      const unlisted = await tree();
+      expect(unlisted.grandchild.parentId).not.toBe(unlisted.child.id);
+    } finally {
+      setShippedPluginKeysForTest([]);
+    }
   });
 
   it("enforces plugin origin namespaces", async () => {

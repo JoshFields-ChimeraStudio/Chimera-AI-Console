@@ -16,7 +16,7 @@ import {
   type IssueLinkData,
   type LinkResult,
 } from "../src/links/index.js";
-import type { LinkRepository, WorkItemKey } from "../src/links/repository.js";
+import { fakeLinkRepository as fakeRepository } from "./fakes.js";
 import type { ListenerHandlers } from "../src/ado/servicebus.js";
 
 const ORG = "https://dev.azure.com/ChimeraStudioSoftware";
@@ -27,55 +27,6 @@ const CONFIG = {
   pat: { type: "secret_ref", secretId: "pat" },
   serviceBusConnection: { type: "secret_ref", secretId: "sb" },
 };
-
-/** In-memory stand-in for the ado_links table, with the same constraints. */
-function fakeRepository(): LinkRepository & { rows: Map<string, AdoLink & { companyId: string }> } {
-  const rows = new Map<string, AdoLink & { companyId: string }>();
-  const same = (r: AdoLink & { companyId: string }, companyId: string, k: WorkItemKey) =>
-    r.companyId === companyId && r.org === k.org && r.project === k.project && r.workItemId === k.workItemId;
-  return {
-    rows,
-    async findByIssue(companyId, issueId) {
-      const r = rows.get(issueId);
-      return r && r.companyId === companyId ? { ...r } : null;
-    },
-    async findByWorkItem(companyId, key) {
-      const r = [...rows.values()].find((x) => same(x, companyId, key));
-      return r ? { ...r } : null;
-    },
-    async insert(companyId, link) {
-      if (rows.has(link.issueId)) throw new Error("duplicate key ado_links_pkey");
-      if ([...rows.values()].some((x) => same(x, companyId, link))) throw new Error("duplicate key ado_links_company_id_org_project_work_item_id_key");
-      rows.set(link.issueId, { ...link, missingAt: null, companyId });
-    },
-    async refresh(companyId, key, data, syncedAt) {
-      let n = 0;
-      for (const r of rows.values()) {
-        if (same(r, companyId, key) && r.rev <= data.rev) {
-          Object.assign(r, data, { syncedAt, missingAt: null });
-          n++;
-        }
-      }
-      return n;
-    },
-    async markMissing(companyId, key, at) {
-      let n = 0;
-      for (const r of rows.values()) {
-        if (same(r, companyId, key) && !r.missingAt) {
-          r.missingAt = at;
-          n++;
-        }
-      }
-      return n;
-    },
-    async remove(companyId, issueId) {
-      const r = rows.get(issueId);
-      if (!r || r.companyId !== companyId) return 0;
-      rows.delete(issueId);
-      return 1;
-    },
-  };
-}
 
 function issue(overrides: Partial<Issue> = {}): Issue {
   return {
@@ -110,6 +61,9 @@ function setup() {
   vi.stubGlobal("fetch", async (input: string | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/wiql")) return Response.json({ workItems: [] });
+    // The work item watcher reads history and comments of linked items.
+    if (/\/workItems\/\d+\/updates/i.test(url)) return Response.json({ value: [] });
+    if (/\/workItems\/\d+\/comments/i.test(url)) return Response.json({ comments: [], totalCount: 0 });
     if (url.includes("/workitemsbatch")) {
       const { ids } = JSON.parse(String(init?.body));
       return Response.json({ value: ids.filter((id: number) => items.has(id)).map((id: number) => adoItem(id, items.get(id)!)) });

@@ -1,4 +1,5 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { LINKED_TASK_ORIGIN_KINDS } from "@paperclipai/shared";
 import { chatConversations, chatEndpoints, heartbeatRuns, issues, statusDecisions, type Db } from "@paperclipai/db";
 import { readInheritedGitHubReviewWait } from "../chat-channels/github/review-wait.js";
 import { authorizeChatConversationForBoundRun } from "./chat-attachment-reuse.js";
@@ -76,5 +77,32 @@ export async function listExternalReviewWaits(db: Db, companyId: string, issueId
       throw error;
     }
   }));
-  return waits.filter((wait): wait is NonNullable<typeof wait> => wait !== null);
+  const chatWaits = waits.filter((wait): wait is NonNullable<typeof wait> => wait !== null);
+  const linkedWaits = await listLinkedItemReviewWaits(db, companyId, issueIds);
+  const seen = new Set(chatWaits.map(wait => wait.issueId));
+  return [...chatWaits, ...linkedWaits.filter(wait => !seen.has(wait.issueId))];
+}
+
+/**
+ * Fork patch (Chimera): an in_review task linked to an external work item (an
+ * ADO work item) is parked on that item. The plugin wakes the assignee when the
+ * item, its reviews or its pull request change, so the review path is
+ * maintained and recovery must not treat it as lost.
+ */
+export async function listLinkedItemReviewWaits(db: Db, companyId: string, issueIds: string[]) {
+  if (!issueIds.length) return [];
+  return db.select({
+    id: issues.id,
+    companyId: issues.companyId,
+    issueId: issues.id,
+    status: issues.status,
+    createdAt: issues.updatedAt,
+  }).from(issues)
+    .where(and(
+      eq(issues.companyId, companyId),
+      inArray(issues.id, issueIds),
+      eq(issues.status, "in_review"),
+      isNotNull(issues.assigneeAgentId),
+      inArray(issues.originKind, [...LINKED_TASK_ORIGIN_KINDS]),
+    ));
 }

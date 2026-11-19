@@ -5,7 +5,7 @@ import manifest from "../src/manifest.js";
 import { AdoClient } from "../src/ado/client.js";
 import type { PluginDeps } from "../src/deps.js";
 import type { AdoLink, LinkFeatures } from "../src/links/index.js";
-import { registerAgentTools } from "../src/tools/index.js";
+import { countReviewRounds, registerAgentTools } from "../src/tools/index.js";
 import { TOOL_DECLARATIONS, TOOL_NAMES } from "../src/tools/definitions.js";
 import { attributedHtml, htmlToText, textToHtml } from "../src/tools/html.js";
 import { ROLE_POLICIES, pruneBindings, resolveRole, type RoleBindings } from "../src/tools/roles.js";
@@ -23,6 +23,8 @@ const AGENTS = {
   /** A later hire who was given a former planner's name. */
   newTiamat: { id: "a-tiamat-2", companyId: CO, name: "Tiamat" },
   stranger: { id: "a-stranger", companyId: CO, name: "Stranger" },
+  boss: { id: "a-boss", companyId: CO, name: "Boss" },
+  arch: { id: "a-arch", companyId: CO, name: "Arch" },
 };
 
 const CONFIG = {
@@ -34,7 +36,22 @@ const CONFIG = {
     { agent: "tiamat", role: "planner" },
     { agent: "Ladon", role: "reviewer" },
     { agent: "Ryujin", role: "builder" },
+    { agent: "Boss", role: "director" },
+    { agent: "Arch", role: "architect" },
   ],
+};
+
+/** States per type, as the Chimera process names them. */
+const TYPE_STATES: Record<string, string[]> = {
+  Epic: ["New", "In Progress", "Blocked", "Completed", "Removed"],
+  Documentation: ["New", "In Progress", "Blocked", "Completed", "Removed"],
+  Document: ["New", "In Progress", "In Review", "Changes Requested", "Blocked", "Completed", "Removed"],
+  Feature: ["New", "Ready For Work", "In Progress", "Blocked", "Completed", "Removed"],
+  "User Story": ["New", "In Progress", "In Review", "Changes Requested", "Blocked", "Completed", "Removed"],
+  Review: ["New", "In Progress", "Changes Requested", "Blocked", "Completed", "Removed"],
+  Bug: ["New", "In Progress", "In Review", "Blocked", "Completed", "Removed"],
+  Task: ["New", "In Progress", "Blocked", "Completed", "Removed"],
+  Defect: ["New", "In Progress", "Blocked", "Completed", "Removed"],
 };
 
 interface FakeItem {
@@ -53,6 +70,22 @@ class FakeAdo {
   /** Answer every request with this status (and optional Retry-After). */
   failWith: { status: number; retryAfter?: string } | null = null;
   nextId = 500;
+  /** Pull requests by id, with their threads. */
+  prs = new Map<number, { id: number; title: string; status: string; source: string; target: string; description: string; workItemRefs: unknown[];
+    threads: Array<{ id: number; status: string; threadContext: unknown; comments: Array<{ id: number; content: string; commentType: string; author: { displayName: string } }> }> }>();
+  nextPrId = 400;
+  /** The updates API: state changes per item, oldest first. */
+  updates = new Map<number, Array<{ rev: number; fields: Record<string, { oldValue?: unknown; newValue: unknown }> }>>();
+
+  /** Add a work item of `type` in `state`, optionally under `parent`. */
+  add(id: number, type: string, state = "New", parent?: number) {
+    this.items.set(id, {
+      id,
+      rev: 1,
+      fields: { "System.WorkItemType": type, "System.State": state, "System.Title": `${type} ${id}`, ...(parent ? { "System.Parent": parent } : {}) },
+      relations: parent ? [{ rel: "System.LinkTypes.Hierarchy-Reverse", url: `${ORG}/_apis/wit/workItems/${parent}` }] : [],
+    });
+  }
 
   constructor() {
     this.items.set(42, {
@@ -113,7 +146,12 @@ class FakeAdo {
             return Response.json({ message: "TF26071: This work item has been changed by someone else" }, { status: 412 });
           }
           if (op.path === "/relations/-") item.relations.push(op.value);
-          else if (op.path.startsWith("/fields/")) item.fields[op.path.slice(8)] = op.value;
+          else if (op.path === "/fields/System.State") {
+            const list = this.updates.get(item.id) ?? [];
+            list.push({ rev: item.rev + 1, fields: { "System.State": { oldValue: item.fields["System.State"], newValue: op.value } } });
+            this.updates.set(item.id, list);
+            item.fields["System.State"] = op.value;
+          } else if (op.path.startsWith("/fields/")) item.fields[op.path.slice(8)] = op.value;
         }
         item.rev++;
       }
@@ -130,11 +168,58 @@ class FakeAdo {
       return Response.json(item);
     }
     if ((m = path.match(/^\/_apis\/wit\/workitemtypes\/(.+)\/states$/))) {
-      return Response.json({ value: ["New", "Active", "Resolved", "Closed", "Removed"].map((name) => ({ name, category: "x" })) });
+      const states = TYPE_STATES[decodeURIComponent(m[1]!)] ?? ["New", "Active", "Resolved", "Closed", "Removed"];
+      return Response.json({ value: states.map((name) => ({ name, category: "x" })) });
+    }
+    if ((m = path.match(/^\/_apis\/wit\/workItems\/(\d+)\/updates$/))) {
+      const skip = Number(new URL(url).searchParams.get("$skip") ?? 0);
+      return Response.json({ value: (this.updates.get(Number(m[1])) ?? []).slice(skip, skip + 200) });
     }
     if ((m = path.match(/^\/_apis\/git\/repositories\/([^/]+)$/))) {
       if (decodeURIComponent(m[1]!) !== "SimpleRepo") return Response.json({ message: "repo not found" }, { status: 404 });
       return Response.json({ id: REPO_ID, name: "SimpleRepo", project: { id: PROJECT_ID } });
+    }
+    const prJson = (pr: { id: number; title: string; status: string; source: string; target: string }) => ({
+      pullRequestId: pr.id, title: pr.title, status: pr.status, sourceRefName: `refs/heads/${pr.source}`, targetRefName: `refs/heads/${pr.target}`,
+      repository: { id: REPO_ID, name: "SimpleRepo" },
+    });
+    if ((m = path.match(/^\/_apis\/git\/repositories\/([^/]+)\/pullrequests$/))) {
+      if (method === "POST") {
+        if (body.sourceRefName === "refs/heads/missing") return Response.json({ message: "TF401398: branch not found" }, { status: 404 });
+        const pr = { id: this.nextPrId++, title: body.title, status: "active", source: body.sourceRefName.slice(11), target: body.targetRefName.slice(11),
+          description: body.description, workItemRefs: body.workItemRefs, threads: [] };
+        this.prs.set(pr.id, pr);
+        return Response.json({ pullRequestId: pr.id });
+      }
+      const q = new URL(url).searchParams;
+      const found = [...this.prs.values()].filter((pr) => `refs/heads/${pr.source}` === q.get("searchCriteria.sourceRefName") &&
+        `refs/heads/${pr.target}` === q.get("searchCriteria.targetRefName") && pr.status === q.get("searchCriteria.status"));
+      return Response.json({ value: found.map((pr) => ({ pullRequestId: pr.id })) });
+    }
+    if ((m = path.match(/^\/_apis\/git\/(?:repositories\/[^/]+\/)?pull[rR]equests\/(\d+)\/threads(?:\/(\d+)(\/comments)?)?$/))) {
+      const pr = this.prs.get(Number(m[1]));
+      if (!pr) return Response.json({ message: "pr not found" }, { status: 404 });
+      if (!m[2]) {
+        if (method === "POST") {
+          const t = { id: pr.threads.length + 1, status: body.status, threadContext: body.threadContext ?? null,
+            comments: [{ id: 1, content: body.comments[0].content, commentType: "text", author: { displayName: "AI Service" } }] };
+          pr.threads.push(t);
+          return Response.json(t);
+        }
+        return Response.json({ value: pr.threads });
+      }
+      const t = pr.threads.find((x) => x.id === Number(m![2]));
+      if (!t) return Response.json({ message: "thread not found" }, { status: 404 });
+      if (m[3] && method === "POST") {
+        const c = { id: t.comments.length + 1, content: body.content, commentType: "text", author: { displayName: "AI Service" } };
+        t.comments.push(c);
+        return Response.json(c);
+      }
+      if (method === "PATCH") t.status = body.status;
+      return Response.json(t);
+    }
+    if ((m = path.match(/^\/_apis\/git\/(?:repositories\/[^/]+\/)?pullrequests\/(\d+)$/)) && this.prs.has(Number(m[1]))) {
+      return Response.json(prJson(this.prs.get(Number(m[1]))!));
     }
     if ((m = path.match(/^\/_apis\/git\/repositories\/([^/]+)\/pullrequests\/(\d+)$/))) {
       if (m[2] === "404") return Response.json({ message: "pr not found" }, { status: 404 });
@@ -159,7 +244,7 @@ interface Setup {
   call: (tool: string, params: unknown, agent?: keyof typeof AGENTS, runId?: string) => Promise<ToolResult>;
 }
 
-function setup(opts: { links?: Record<string, number>; config?: Record<string, unknown> } = {}): Setup {
+function setup(opts: { links?: Record<string, number>; config?: Record<string, unknown>; assignees?: Record<number, string> } = {}): Setup {
   const ado = new FakeAdo();
   const harness = createTestHarness({ manifest, config: opts.config ?? CONFIG });
   harness.seed({
@@ -170,9 +255,14 @@ function setup(opts: { links?: Record<string, number>; config?: Record<string, u
     ] as never,
   });
   const linkMap = opts.links ?? { "issue-1": 42, "issue-3": 42 };
-  const links: LinkFeatures = {
+  // The agent each work item's linked task is assigned to (the item's "assignee"). Ryujin has #42.
+  const assignees = opts.assignees ?? { 42: AGENTS.ryujin.id };
+  const links: Pick<LinkFeatures, "findLinkByIssue" | "findTaskForWorkItem" | "onWorkItemChanged"> = {
     async findLinkByIssue(_companyId, issueId) {
       return issueId in linkMap ? link(issueId, linkMap[issueId]!) : null;
+    },
+    async findTaskForWorkItem(_companyId, workItemId) {
+      return workItemId in assignees ? ({ id: `task-${workItemId}`, assigneeAgentId: assignees[workItemId], assigneeUserId: null } as never) : null;
     },
     async onWorkItemChanged() {},
   };
@@ -231,9 +321,23 @@ describe("roles", () => {
     expect(pruneBindings([{ agent: "Ladon", role: "reviewer" }], { tiamat: "a", ladon: "b" })).toEqual({ ladon: "b" });
   });
 
-  it("only planners and builders write structure; readonly only reads", () => {
-    expect(ROLE_POLICIES.readonly.tools).toEqual([TOOL_NAMES.getWorkItem]);
-    expect(ROLE_POLICIES.reviewer.tools).not.toContain(TOOL_NAMES.createChildWorkItem);
+  it("readonly only reads; the create tool goes to the roles the creation table names", () => {
+    expect(ROLE_POLICIES.readonly.tools).toEqual([TOOL_NAMES.getWorkItem, TOOL_NAMES.getWorkflow, TOOL_NAMES.getPullRequestThreads]);
+    for (const role of ["director", "planner", "architect", "builder", "reviewer", "qa"] as const) {
+      expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.postPullRequestComment);
+    }
+    for (const role of ["reviewer", "qa", "readonly"] as const) expect(ROLE_POLICIES[role].tools).not.toContain(TOOL_NAMES.createPullRequest);
+    expect(ROLE_POLICIES.builder.tools).toContain(TOOL_NAMES.createPullRequest);
+    for (const role of ["director", "planner", "builder"] as const) expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.createWorkItem);
+    for (const role of ["architect", "reviewer", "readonly"] as const) expect(ROLE_POLICIES[role].tools).not.toContain(TOOL_NAMES.createWorkItem);
+    for (const role of ["director", "planner", "architect", "builder", "reviewer"] as const) expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.assign);
+    expect(ROLE_POLICIES.reviewer.tools).not.toContain(TOOL_NAMES.linkPullRequest);
+    expect(ROLE_POLICIES.architect.tools).toEqual(ROLE_POLICIES.builder.tools.filter((t) => t !== TOOL_NAMES.createWorkItem));
+  });
+
+  it("maps the director and architect roles", async () => {
+    expect((await resolveRole(CONFIG.agentRoles, AGENTS.boss, memoryStore())).role).toBe("director");
+    expect((await resolveRole(CONFIG.agentRoles, AGENTS.arch, memoryStore())).role).toBe("architect");
   });
 });
 
@@ -257,9 +361,70 @@ describe("host risk rating of tool names", () => {
   it("rates every writing tool as write and the read tool as read", () => {
     for (const t of TOOL_DECLARATIONS) {
       const namespaced = `chimera.plugin-ado:${t.name}`;
-      expect([t.name, hostToolRisk(t.name)]).toEqual([t.name, t.name === TOOL_NAMES.getWorkItem ? "read" : "write"]);
+      const reads: string[] = [TOOL_NAMES.getWorkItem, TOOL_NAMES.getWorkflow, TOOL_NAMES.getPullRequestThreads];
+      expect([t.name, hostToolRisk(t.name)]).toEqual([t.name, reads.includes(t.name) ? "read" : "write"]);
       expect(hostToolRisk(namespaced)).toBe(hostToolRisk(t.name));
     }
+  });
+});
+
+describe("pull request tools", () => {
+  it("opens a signed pull request linked to the task's work item, and returns the open one instead of a second", async () => {
+    const s = setup();
+    const params = { repository: "SimpleRepo", sourceBranch: "refs/heads/ai/42-story", title: "#42 Story", description: "Adds the line." };
+    const res = await s.call(TOOL_NAMES.createPullRequest, params, "ryujin", "run-with-task");
+    expect(res.error).toBeUndefined();
+    expect(res.content).toBe(
+      `Opened pull request 400 "#42 Story" from ai/42-story into main in SimpleRepo, linked to #42: ${ORG}/AI%20Testing/_git/SimpleRepo/pullrequest/400`,
+    );
+    expect(s.ado.prs.get(400)).toMatchObject({ source: "ai/42-story", target: "main", description: "Adds the line.\n\n_Opened by [Ryujin]._", workItemRefs: [{ id: "42" }] });
+    expect(s.harness.activity.at(-1)).toMatchObject({ message: "[Ryujin] opened PR 400 in SimpleRepo (ai/42-story into main)" });
+
+    const again = await s.call(TOOL_NAMES.createPullRequest, params, "ryujin", "run-with-task");
+    expect(again.content).toMatch(/^An active pull request from ai\/42-story into main already exists: 400 "#42 Story"/);
+    expect(s.ado.prs.size).toBe(1);
+  });
+
+  it("links the work items given, refuses a missing branch, and is not for reviewers", async () => {
+    const s = setup();
+    const res = await s.call(TOOL_NAMES.createPullRequest, { repository: "SimpleRepo", sourceBranch: "ai/55-fix", title: "#55 Fix", workItemIds: [55, 42, 55] }, "ryujin");
+    expect(res.data).toMatchObject({ pullRequestId: 400, workItemIds: [55, 42] });
+    expect((await s.call(TOOL_NAMES.createPullRequest, { repository: "SimpleRepo", sourceBranch: "missing", title: "x", workItemIds: [42] }, "ryujin")).error).toMatch(
+      /branch missing or main was not found in SimpleRepo\. Push the branch first\./,
+    );
+    expect((await s.call(TOOL_NAMES.createPullRequest, { repository: "SimpleRepo", sourceBranch: "main", title: "x", workItemIds: [42] }, "ryujin")).error).toMatch(
+      /same branch/,
+    );
+    expect((await s.call(TOOL_NAMES.createPullRequest, { repository: "SimpleRepo", sourceBranch: "a", title: "x", workItemIds: [42] }, "ladon")).error).toMatch(
+      /^Permission denied: Ladon has the ADO role "reviewer"/,
+    );
+  });
+
+  it("starts signed threads (on a file and line), replies, sets thread status, and reads them back", async () => {
+    const s = setup();
+    await s.call(TOOL_NAMES.createPullRequest, { repository: "SimpleRepo", sourceBranch: "ai/42-story", title: "#42 Story", workItemIds: [42] }, "ryujin");
+    const finding = await s.call(TOOL_NAMES.postPullRequestComment, { pullRequestId: 400, text: "Say Hello from the agents.", filePath: "HelloWorld.md", line: 1 }, "ladon");
+    expect(finding.error).toBeUndefined();
+    expect(finding.data).toMatchObject({ threadId: 1, status: "active" });
+    expect(s.ado.prs.get(400)!.threads[0]).toMatchObject({
+      status: "active",
+      threadContext: { filePath: "/HelloWorld.md", rightFileStart: { line: 1, offset: 1 } },
+      comments: [{ content: "[Ladon] Say Hello from the agents." }],
+    });
+    const reply = await s.call(TOOL_NAMES.postPullRequestComment, { repository: "SimpleRepo", pullRequestId: 400, threadId: 1, text: "[Ryujin] Fixed in abc123.", status: "Fixed" }, "ryujin");
+    expect(reply.content).toBe("Replied on thread 1 of pull request 400 and set it fixed.");
+    expect(s.ado.prs.get(400)!.threads[0]).toMatchObject({ status: "fixed", comments: [{}, { content: "[Ryujin] Fixed in abc123." }] });
+
+    const read = await s.call(TOOL_NAMES.getPullRequestThreads, { pullRequestId: 400 }, "stranger");
+    expect(read.error).toBeUndefined();
+    expect(read.content).toContain("Thread 1 (fixed) on /HelloWorld.md line 1:\n- AI Service: [Ladon] Say Hello from the agents.\n- AI Service: [Ryujin] Fixed in abc123.");
+    expect((await s.call(TOOL_NAMES.postPullRequestComment, { pullRequestId: 400, text: "x", threadId: 9 }, "ladon")).error).toMatch(/^Thread 9 was not found/);
+    expect((await s.call(TOOL_NAMES.postPullRequestComment, { pullRequestId: 400, text: "x", status: "done" }, "ladon")).error).toMatch(/^status must be one of/);
+    expect((await s.call(TOOL_NAMES.postPullRequestComment, { pullRequestId: 400, text: "x" }, "stranger")).error).toMatch(/^Permission denied/);
+    s.ado.prs.get(400)!.status = "completed";
+    expect((await s.call(TOOL_NAMES.postPullRequestComment, { pullRequestId: 400, text: "late" }, "ladon")).error).toBe(
+      "Pull request 400 is completed, so nothing was posted. Comment on the work item instead.",
+    );
   });
 });
 
@@ -281,7 +446,8 @@ describe("manifest", () => {
       expect(manifest.capabilities).toContain(cap);
     }
     const roles = (manifest.instanceConfigSchema as any).properties.agentRoles;
-    expect(roles.items.properties.role.enum).toEqual(["readonly", "builder", "reviewer", "planner"]);
+    expect(roles.items.properties.role.enum).toEqual(["director", "planner", "architect", "builder", "reviewer", "qa", "readonly"]);
+    expect(manifest.capabilities).toContain("issue.comments.create");
   });
 
   it("gives every tool an object schema that rejects unknown parameters", () => {
@@ -300,11 +466,11 @@ describe("ADO client additions", () => {
     await client.addComment(42, "x");
     await client.updateWorkItem(42, [{ op: "test", path: "/rev", value: 7 }]);
     await client.createWorkItem("User Story", [{ op: "add", path: "/fields/System.Title", value: "t" }]);
-    expect(await client.getWorkItemTypeStates("User Story")).toContainEqual({ name: "Active", category: "x" });
+    expect(await client.getWorkItemTypeStates("User Story")).toContainEqual({ name: "In Progress", category: "x" });
     expect(await client.getRepository("SimpleRepo")).toEqual({ id: REPO_ID, name: "SimpleRepo", projectId: PROJECT_ID });
     expect((await client.getPullRequest(REPO_ID, 5)).title).toBe("Add feature");
     const [list, add, patch, create, states] = ado.requests;
-    expect(list!.url).toBe(`${ORG}/AI%20Testing/_apis/wit/workItems/42/comments?$top=3&order=desc&api-version=7.1-preview.4`);
+    expect(list!.url).toBe(`${ORG}/AI%20Testing/_apis/wit/workItems/42/comments?$top=3&order=desc&$expand=renderedText&api-version=7.1-preview.4`);
     expect(add).toMatchObject({ method: "POST", body: { text: "x" } });
     expect(patch).toMatchObject({ method: "PATCH", contentType: "application/json-patch+json" });
     expect(create!.url).toBe(`${ORG}/AI%20Testing/_apis/wit/workitems/$User%20Story?api-version=7.1`);
@@ -350,7 +516,7 @@ describe("agent tools", () => {
       const read = await s.call(TOOL_NAMES.getWorkItem, { workItemId: 42 }, "stranger");
       expect(read.error).toBeUndefined();
       const denied = await s.call(TOOL_NAMES.addComment, { workItemId: 42, text: "hi" }, "stranger");
-      expect(denied.error).toMatch(/^Permission denied: Stranger has the ADO role "readonly", which allows only ado_get_work_item\./);
+      expect(denied.error).toMatch(/^Permission denied: Stranger has the ADO role "readonly", which allows only ado_get_work_item, ado_get_workflow, ado_get_pr_threads\./);
       expect(s.ado.writes()).toHaveLength(0);
       expect(s.harness.activity).toHaveLength(0);
     });
@@ -359,17 +525,23 @@ describe("agent tools", () => {
       const s = setup();
       expect((await s.call(TOOL_NAMES.addComment, { workItemId: 42, text: "ok" }, "ladon")).error).toBeUndefined();
       expect((await s.call(TOOL_NAMES.linkPullRequest, { workItemId: 42, repository: "SimpleRepo", pullRequestId: 5 }, "ladon")).error).toMatch(/Permission denied/);
-      expect((await s.call(TOOL_NAMES.createChildWorkItem, { parentId: 42, type: "Task", title: "x" }, "ladon")).error).toMatch(/Permission denied/);
+      expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Task", title: "x" }, "ladon")).error).toMatch(/Permission denied/);
     });
 
-    it("builders may create Tasks only; planners any type", async () => {
+    it("builders may create Tasks only, under the right parent type; planners any type", async () => {
       const s = setup();
-      const feature = await s.call(TOOL_NAMES.createChildWorkItem, { parentId: 42, type: "Feature", title: "x" }, "ryujin");
-      expect(feature.error).toBe("Your ADO role (builder) may not create Feature work items; it may create: Task.");
-      expect((await s.call(TOOL_NAMES.createChildWorkItem, { parentId: 42, type: "Bug", title: "x" }, "ryujin")).error).toMatch(/may not create Bug/);
+      const feature = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Feature", title: "x" }, "ryujin");
+      expect(feature.error).toBe(
+        'Workflow rule "create Feature": only the planner role may create Feature work items. Your role (builder) may create: Task. Read the rules with ado_get_workflow.',
+      );
+      expect((await s.call(TOOL_NAMES.createWorkItem, { type: "Bug", title: "x" }, "ryujin")).error).toMatch(/only the planner role may create Bug work items \(Josh enters Bugs in ADO\)/);
+      expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Feature", title: "x" }, "tiamat")).error).toBe(
+        'Workflow rule "create Feature": a Feature goes under an Epic, not under a User Story. Read the rules with ado_get_workflow.',
+      );
       expect(s.ado.writes()).toHaveLength(0);
-      expect((await s.call(TOOL_NAMES.createChildWorkItem, { parentId: 42, type: "task", title: "x" }, "ryujin")).error).toBeUndefined();
-      expect((await s.call(TOOL_NAMES.createChildWorkItem, { parentId: 42, type: "Feature", title: "x" }, "tiamat")).error).toBeUndefined();
+      expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "task", title: "x" }, "ryujin")).error).toBeUndefined();
+      expect(s.ado.writes()[0]!.url).toContain("/$Task?");
+      expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Test Case", title: "x" }, "tiamat")).error).toBeUndefined();
     });
   });
 
@@ -438,26 +610,36 @@ describe("agent tools", () => {
     it("lists the valid states when the target is not one of them", async () => {
       const s = setup();
       const res = await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "Doing" });
-      expect(res.error).toBe('"Doing" is not a state of User Story. Valid states: New, Active, Resolved, Closed, Removed.');
+      expect(res.error).toBe('"Doing" is not a state of User Story. Valid states: New, In Progress, In Review, Changes Requested, Blocked, Completed, Removed.');
       expect(s.ado.writes()).toHaveLength(0);
     });
 
     it("patches with test /rev first, attributes the history and caches the type's states", async () => {
       const s = setup();
-      const res = await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "active", comment: "Starting work" });
-      expect(res.content).toBe("Work item #42 moved from New to Active.");
+      const res = await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "in progress", comment: "Starting work" }, "ryujin");
+      expect(res.content).toBe("Work item #42 moved from New to In Progress.");
       const patch = s.ado.writes()[0]!;
       expect(patch.body).toEqual([
         { op: "test", path: "/rev", value: 7 },
-        { op: "replace", path: "/fields/System.State", value: "Active" },
-        { op: "add", path: "/fields/System.History", value: "[Tiamat] Changed state from New to Active.<br>Starting work" },
-        { op: "add", path: "/fields/System.Tags", value: "agent:Tiamat" },
+        { op: "replace", path: "/fields/System.State", value: "In Progress" },
+        { op: "add", path: "/fields/System.History", value: "[Ryujin] Changed state from New to In Progress.<br>Starting work" },
+        { op: "add", path: "/fields/System.Tags", value: "agent:Ryujin" },
       ]);
-      expect(s.harness.activity[0]).toMatchObject({ message: "[Tiamat] moved ADO #42 from New to Active", metadata: { from: "New", to: "Active" } });
+      expect(s.harness.activity[0]).toMatchObject({
+        message: "[Ryujin] moved ADO #42 from New to In Progress",
+        metadata: { from: "New", to: "In Progress", rule: "User Story, Bug: In Progress, In Review, Ready To Merge, In Testing, Completed, Blocked" },
+      });
 
-      await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "Resolved" });
+      await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "In Review" }, "ryujin");
       expect(s.ado.requests.filter((r) => r.url.includes("/states")).length).toBe(1);
-      expect((await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "Resolved" })).content).toMatch(/already Resolved/);
+      expect((await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "In Review" }, "ryujin")).content).toMatch(/already In Review/);
+    });
+
+    it("counts review rounds since the Review last approved", () => {
+      const st = (from: string, to: string) => ({ rev: 1, revisedBy: "x", revisedDate: null, fields: { "System.State": { oldValue: from, newValue: to } } });
+      expect(countReviewRounds([st("In Review", "Changes Requested"), st("Ready For Review", "Approved"), st("In Review", "Changes Requested")])).toBe(1);
+      expect(countReviewRounds([st("In Review", "Changes Requested"), st("Ready For Review", "Changes Requested")])).toBe(2);
+      expect(countReviewRounds([])).toBe(0);
     });
 
     it("tells the agent to re-read when the item changed underneath it", async () => {
@@ -468,7 +650,7 @@ describe("agent tools", () => {
         if (init?.method === "PATCH") s.ado.items.get(42)!.rev = 99;
         return realFetch(input, init);
       };
-      const res = await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "Active" });
+      const res = await s.call(TOOL_NAMES.setState, { workItemId: 42, state: "In Progress" }, "ryujin");
       expect(res.error).toMatch(/changed since it was read.*Re-read it with ado_get_work_item/);
       expect(s.harness.activity).toHaveLength(0);
     });
@@ -534,9 +716,9 @@ describe("agent tools", () => {
     });
   });
 
-  it("ado_create_child_work_item links the parent and inherits its area and iteration", async () => {
+  it("ado_create_work_item links the parent and inherits its area and iteration", async () => {
     const s = setup();
-    const res = await s.call(TOOL_NAMES.createChildWorkItem, { parentId: 42, type: "Task", title: "Write tests", description: "a < b\nc" }, "ryujin");
+    const res = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Task", title: "Write tests", description: "a < b\nc" }, "ryujin");
     expect(res.data).toMatchObject({ workItemId: 500, parentId: 42, type: "Task" });
     const create = s.ado.writes()[0]!;
     expect(create.url).toContain("/_apis/wit/workitems/$Task?");
@@ -552,12 +734,31 @@ describe("agent tools", () => {
     expect(s.harness.activity[0]).toMatchObject({ message: "[Ryujin] created Task ADO #500 under #42", metadata: { workItemId: 500, parentId: 42 } });
   });
 
+  it("ado_create_work_item writes acceptance criteria, and refuses them for a type without the field", async () => {
+    const s = setup();
+    const res = await s.call(
+      TOOL_NAMES.createWorkItem,
+      { type: "Epic", title: "Add a line", acceptanceCriteria: "README has the line\nNothing else changes" },
+      "tiamat",
+    );
+    expect(res.error).toBeUndefined();
+    expect(s.ado.writes()[0]!.body).toContainEqual({
+      op: "add",
+      path: "/fields/Microsoft.VSTS.Common.AcceptanceCriteria",
+      value: "README has the line<br>Nothing else changes",
+    });
+    const before = s.ado.writes().length;
+    const task = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Task", title: "x", acceptanceCriteria: "y" }, "ryujin");
+    expect(task.error).toBe("Nothing was created: a Task has no acceptance criteria field; put the criteria in the description.");
+    expect(s.ado.writes().length).toBe(before);
+  });
+
   describe("default work item", () => {
     it("uses the work item linked to the run's task when no ID is given", async () => {
       const s = setup();
       const res = await s.call(TOOL_NAMES.getWorkItem, {}, "ryujin", "run-with-task");
       expect((res.data as any).id).toBe(42);
-      const child = await s.call(TOOL_NAMES.createChildWorkItem, { type: "Task", title: "x" }, "ryujin", "run-with-task");
+      const child = await s.call(TOOL_NAMES.createWorkItem, { type: "Task", title: "x" }, "ryujin", "run-with-task");
       expect(child.data).toMatchObject({ parentId: 42 });
     });
 

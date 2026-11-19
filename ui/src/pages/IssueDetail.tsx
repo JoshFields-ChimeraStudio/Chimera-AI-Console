@@ -3,7 +3,7 @@ import { TaskChatLoadingShell } from "@/components/task-chat/TaskChatLoadingShel
 import { useConversationHistoryPages, type ConversationHistoryPage } from "@/hooks/useConversationHistoryPages";
 import { taskChatHashAnchor } from "@/components/task-chat/scroll-navigation";
 import { AgentChatReadProvider } from "@/hooks/useAgentChatRead";
-import { useCoordinatorWorkspaceEnabled } from "@/hooks/useCoordinatorWorkspaceEnabled";
+import { useTaskDetailInterfaceMode } from "@/hooks/useTaskDetailInterfaceMode";
 import { TaskDecisionRecord } from "@/components/TaskDecisionRecord";
 import { useAccountBoundMutation } from "@/hooks/useAccountBoundMutation";
 import { bindAccount } from "@/lib/account-scope";
@@ -214,8 +214,6 @@ import {
 } from "../components/IssueChatThread";
 import { TaskChatThread } from "../components/TaskChatThread";
 import type { TaskChatIssueBrief } from "../components/task-chat/TaskChatDescriptionBubble";
-import { useClassicTaskInterfaceEnabled } from "../hooks/useClassicTaskInterfaceEnabled";
-import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
 import { workModeMetaFor } from "../lib/work-mode-meta";
 import { IssueContinuationHandoff } from "../components/IssueContinuationHandoff";
 import { IssueAttachmentsSection } from "../components/IssueAttachmentsSection";
@@ -933,28 +931,6 @@ function IssueChatSkeleton() {
       <ChatBubbleSkeleton side="human" className="h-8 w-2/5" />
     </div>
   );
-}
-
-function useTaskDetailInterfaceMode(conversationMode = false) {
-  const {
-    enabled: classicTaskInterfacePreferenceEnabled,
-    loaded: classicTaskInterfaceLoaded,
-  } = useClassicTaskInterfaceEnabled();
-  const { enabled: classicStreamlinedUiEnabled, loaded: streamlinedUiLoaded } =
-    useStreamlinedUiEnabled();
-  const { enabled: coordinatorWorkspaceEnabled, loaded: coordinatorLoaded } = useCoordinatorWorkspaceEnabled();
-  const streamlinedUiEnabled = classicStreamlinedUiEnabled || coordinatorWorkspaceEnabled;
-  const classicTaskInterfaceEnabled = classicTaskInterfacePreferenceEnabled && !conversationMode && !coordinatorWorkspaceEnabled;
-  const taskChatShellEnabled = !classicTaskInterfaceEnabled;
-
-  return {
-    coordinatorWorkspaceEnabled,
-    classicTaskInterfaceEnabled,
-    taskChatShellEnabled,
-    streamlinedTaskDetailEnabled: streamlinedUiEnabled && taskChatShellEnabled,
-    streamlinedUiEnabled,
-    loaded: classicTaskInterfaceLoaded && streamlinedUiLoaded && coordinatorLoaded,
-  };
 }
 
 export function IssueDetailLoadingState({

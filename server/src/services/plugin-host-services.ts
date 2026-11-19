@@ -16,6 +16,7 @@ import {
   invites,
   issues as issuesTable,
   pluginLogs,
+  plugins as pluginsTable,
   principalPermissionGrants,
   projects as projectsTable,
 } from "@paperclipai/db";
@@ -40,6 +41,7 @@ import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { issueService } from "./issues.js";
+import type { IssueParentDepthPolicy } from "./issue-hierarchy.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
@@ -52,6 +54,7 @@ import { subscribeCompanyLiveEvents } from "./live-events.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { isTrustedShippedPluginRecord } from "./shipped-plugins.js";
 import { pluginStateStore } from "./plugin-state-store.js";
 import { pluginLifecycleInbox } from "./plugin-lifecycle-inbox.js";
 import { pluginDatabaseService } from "./plugin-database.js";
@@ -998,6 +1001,28 @@ export function buildHostServices(
    * availability gate to enforce here.
    */
   const ensurePluginAvailableForCompany = async (_companyId: string) => {};
+
+  /**
+   * Fork patch (Chimera): plugins create tasks with the agent "flatten" depth rule
+   * (parent → child only; doc/plans/2026-11-05-two-level-task-hierarchy.md). The
+   * plugins that ship with this server are trusted like server code, and the ADO
+   * plugin mirrors the ADO tree (Feature → Story → review Task), so for them a
+   * requested parent is kept at any depth, as for a board user.
+   */
+  const pluginParentDepthPolicy = async (): Promise<IssueParentDepthPolicy | undefined> => {
+    // Any doubt (no record, a lookup error, an id that is not a record id) keeps the
+    // default "flatten" rule.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(pluginId)) return undefined;
+    try {
+      const [record] = await db
+        .select({ pluginKey: pluginsTable.pluginKey, status: pluginsTable.status, packagePath: pluginsTable.packagePath })
+        .from(pluginsTable)
+        .where(eq(pluginsTable.id, pluginId));
+      return record && isTrustedShippedPluginRecord(record) ? "allow_nested" : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   const getLocalFolderDeclaration = (folderKey: string) =>
     requireLocalFolderDeclaration(options.manifest?.localFolders, folderKey);
@@ -2150,8 +2175,10 @@ export function buildHostServices(
             await requirePluginReadableIssue(sourceRun.issueId, companyId);
           }
         }
+        const parentDepthPolicy = issueInput.parentId ? await pluginParentDepthPolicy() : undefined;
         const issue = (await issues.create(companyId, {
           ...(issueInput as any),
+          ...(parentDepthPolicy ? { parentDepthPolicy } : {}),
           originKind: normalizedOriginKind,
           originId: params.originId ?? null,
           originRunId: params.originRunId ?? actorRunId ?? null,
@@ -2206,8 +2233,10 @@ export function buildHostServices(
             }
           }
         }
+        const parentDepthPolicy = patch.parentId ? await pluginParentDepthPolicy() : undefined;
         const updated = (await issues.update(params.issueId, {
           ...(patch as any),
+          ...(parentDepthPolicy ? { parentDepthPolicy } : {}),
           actorAgentId,
           actorUserId,
         })) as Issue;

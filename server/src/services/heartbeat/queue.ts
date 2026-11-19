@@ -342,6 +342,11 @@ export function shouldQueueFollowupForRunningIssueWake(input: {
   ) {
     return true;
   }
+  // Fork patch (Chimera): a plugin wake carries news from outside the run (the
+  // ADO plugin posts what changed on the task, then wakes the assignee). Merged
+  // into a turn that is already running, the agent never sees it, so it waits
+  // for the next turn instead.
+  if (readNonEmptyString(input.contextSnapshot?.pluginId)) return true;
   const wakeReason = readNonEmptyString(input.contextSnapshot?.wakeReason);
   if (wakeReason === "issue_children_completed" && (
     input.contextSnapshot?.onboardingCompletion === true ||

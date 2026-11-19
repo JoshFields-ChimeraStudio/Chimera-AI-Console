@@ -135,6 +135,7 @@ import {
   resolveCacheAdjustedCostUsd,
   resolveLedgerCostStatus,
   createHeartbeatRunState,
+  describeSessionStart,
 } from "./heartbeat/run-state.js";
 export {
   summarizeHeartbeatRunContextSnapshot,
@@ -3196,6 +3197,14 @@ export function heartbeatService(
           persistedExecutionWorkspace, runtimeWorkspaceWarnings, requestedShouldReuseExisting, workspaceReuseRequest,
         },
         evaluateSessionCompaction,
+      });
+      // Fork patch (Chimera): record why this run resumes or starts a session, for the run ledger.
+      context.paperclipSessionStart = describeSessionStart({
+        contextSnapshot: context,
+        taskSessionAvailable: taskSession != null,
+        taskSessionReused: taskSessionForRun != null,
+        configResetReason: resetTaskSession ? sessionResetReason : null,
+        compaction: sessionCompaction,
       });
 
       const runOutput = createHeartbeatRunOutput(db, {

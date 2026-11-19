@@ -61,6 +61,8 @@ let issueDetailLoad: Promise<{ default: typeof import("./pages/IssueDetail").Iss
 const loadIssueDetail = () =>
   (issueDetailLoad ??= import("./pages/IssueDetail").then((module) => ({ default: module.IssueDetail })));
 const IssueDetail = lazy(loadIssueDetail);
+const Backlog = lazy(() => import("./pages/Backlog").then((module) => ({ default: module.Backlog })));
+const BacklogWorkItem = lazy(() => import("./pages/BacklogWorkItem").then((module) => ({ default: module.BacklogWorkItem })));
 const AgentChat = lazy(() => import("./pages/AgentChat").then((module) => ({ default: module.AgentChat })));
 const IssueChatLongThreadPerf = lazy(() => import("./pages/IssueChatLongThreadPerf").then((module) => ({ default: module.IssueChatLongThreadPerf })));
 const loadInbox = () => import("./pages/Inbox").then((module) => ({ default: module.Inbox }));
@@ -331,6 +333,8 @@ function boardRoutes(streamlinedUiEnabled: boolean, combinedInboxTasksEnabled: b
       <Route path="chats" element={<AgentChats />} />
       <Route path="chats/:agentRef" element={<AgentChat />} />
       <Route path="issues/:issueId" element={<IssueDetail />} />
+      <Route path="backlog" element={<Backlog />} />
+      <Route path="backlog/:workItemId" element={<BacklogWorkItem />} />
       {import.meta.env.DEV ? (
         <Route path="tests/perf/long-thread" element={<IssueChatLongThreadPerf />} />
       ) : null}
@@ -811,6 +815,8 @@ export function App() {
           <Route path="issues" element={<UnprefixedBoardRedirect />} />
           <Route path="tasks" element={<UnprefixedBoardRedirect />} />
           <Route path="issues/:issueId" element={<UnprefixedBoardRedirect />} />
+          <Route path="backlog" element={<UnprefixedBoardRedirect />} />
+          <Route path="backlog/:workItemId" element={<UnprefixedBoardRedirect />} />
           <Route path="routines" element={<UnprefixedBoardRedirect />} />
           <Route path="routines/:routineId" element={<UnprefixedBoardRedirect />} />
           <Route path="cases" element={<UnprefixedBoardRedirect />} />

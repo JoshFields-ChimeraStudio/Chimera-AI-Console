@@ -26,11 +26,14 @@ Found by searching this checkout. "Not found" means my searches turned up nothin
 | A1 | Spike: plugin skeleton, event queue, MCP vs REST | P1 | S | |
 | A2 | ADO work item as a first-class link on a task | P1 | done | A1 |
 | A3 | ADO to Paperclip: pick up work automatically | P2 | L | A1, A2 |
-| A4 | Paperclip to ADO: state sync done in code, not prompts | P1 | M | A2 |
-| A5 | ADO pull request on the task, wake on review activity | P2 | L | A2 |
+| A4 | Paperclip to ADO: state sync done in code, not prompts | P1 | done | A2 |
+| A5 | ADO pull request on the task, wake on review activity | P2 | L (wakes done) | A2 |
 | A6 | Routing and assignment rules, WIP limits | P2 | M | A2 |
 | A7 | Automatic agent attribution in ADO | P3 | done | A4 |
-| A8 | Plugin-provided ADO tools for agents | P1 | M | A1 |
+| A8 | Plugin-provided ADO tools for agents | P1 | done (MCP removal open) | A1 |
+| A9 | Pull request tools in the plugin | P1 | done | A8 |
+| A10 | Smoke-test Epic: create or reset from the plugin | P2 | S-M | A8 |
+| A11 | Port the proven workflow to the real AI Team | P1 | M | A9 |
 | **B. Logging and debugging** | | | | |
 | B1 | Run explorer (replaces pull-logs and analyze-logs) | P1 | M | |
 | B2 | Transcript viewer with secret redaction | P1 | M | |
@@ -64,6 +67,8 @@ Found by searching this checkout. "Not found" means my searches turned up nothin
 | E3 | Group chat with several agents (design spike first) | P3 | L | E2, D1, D2, D9 |
 | E4 | Turn a chat into an ADO work item or Grimoire document | P3 | M | A8, C2 |
 
+**ADO order agreed 19 November 2026:** A9, then A4 roll-ups, then D4 (ADO events first), then A11, then A10, then D9's cost per Feature.
+
 Suggested order: the deploy path (P0) is done; then D1 (investigation) and B1/B2 (fast wins: less wasted tokens, no more manual log pulling), then D3, A1, A2, A4, A8 and D4, then the rest. The chat items (E) can follow once those are under way; E1 and E2 are independent of the rest.
 
 ## Prerequisites
@@ -83,13 +88,25 @@ Goal: ADO stays the system of record for work (pilot decision), Paperclip stays 
 
 **A4. State sync in code (P1, M).** Encode the rules from `skills/story-workflow` and `skills/studio-rules` (who sets which state on which work item type, Bugs vs Defects, Documentation items) as a mapping table in the plugin. When a Paperclip task changes status, the plugin updates the ADO state. Agents stop doing this through prompts, which saves tokens and removes a class of mistakes. Needs a decision on direction of truth when both change (ADO wins for humans' edits). Decided: the A8 agent tools enforce these rules too, so they live in one place.
 
-**A5. Pull request on the task (P2, L).** Show the linked ADO PR on the Paperclip task: status, policy checks, reviewer votes and the `[Ladon]` / architecture review comments. Poll for new review threads and wake the builder when review is finished, instead of relying on reviewers finishing Paperclip tasks by hand. Also enforces "the next agent starts only after the PR it depends on is merged" by auto-clearing the blocker when the PR completes.
+*Partly done (November 2026):* the state rules are enforced in the agent tools (`ado_update_state`, with assignment and creation rules; `doc/plans/2026-11-17-agent-workflow.md`). The task-status-to-ADO sync is no longer wanted: since 18 November the Paperclip task follows its ADO item (agents never close tasks; the plugin closes them when the item is final). **Roll-ups done (19 November 2026):** the plugin sets a Feature, Epic or Documentation item Completed when it is In Progress and every child under it is Completed or Removed, instead of an agent run; their owners are woken by a child only when it is Blocked (`doc/plans/2026-11-17-agent-workflow.md`, "Who owns what").
+
+**A5. Pull request on the task (P2, L).** Show the linked ADO PR on the Paperclip task: status, policy checks, reviewer votes and the `[Ladon]` / architecture review comments. Poll for new review threads and wake the builder when review is finished, instead of relying on reviewers finishing Paperclip tasks by hand. Also enforces "the next agent starts only after the PR it depends on is merged" by auto-clearing the blocker when the PR completes. **Wakes done (November 2026):** the builder is woken when its PR is completed or abandoned or gets comments from anyone else, reviewers on open Review items are told about others' comments, and review hand-offs run through Review item states (`doc/plans/2026-11-14-ado-integration.md`, "Pull request events" and "ADO drives the task"). **Open:** PR status, checks and votes shown on the task; clearing "waits for PR X" blockers on merge.
 
 **A6. Routing and assignment (P2, M).** Rules mapping work item type / area path / tags to an agent so the director only handles exceptions; per-agent concurrency (WIP) limits so one agent isn't given five tasks at once; a queue view per agent. Keep the single-assignee invariant (`AGENTS.md` section 5).
 
 **A7. Automatic attribution in ADO (P3, S).** *Done* with the A8 tools: `[Name]` prefix on every comment and history entry, and an `agent:<Name>` tag for the last agent to change an item; see "A8: agent tools" in `doc/plans/2026-11-14-ado-integration.md`. Original scope: All agents share one service account, so comments and updates written by the plugin should carry the agent's name automatically (the `[Ladon]` convention), and an ADO field or tag records which agent last touched an item.
 
 **A8. Plugin-provided ADO tools for agents (P1, M).** *Done* except the A4 state rules and removing the ADO MCP server from agents, which stay open; tools and role table in `doc/plans/2026-11-14-ado-integration.md` ("A8: agent tools"). Original scope: Decision: all agent writes to ADO go through the plugin. The plugin exposes a small set of tools to agents (read work item, comment, set state, link PR, create child item, depending on the agent's role) and performs the call itself, whether that is the MCP server or ADO's REST API underneath. Benefits: one place for permissions per agent role, automatic attribution (A7), every ADO write recorded in the Paperclip activity log, and the state rules from A4 enforced in code. Once tools reach parity, remove the direct ADO MCP server from the agents' configuration so there is only one route.
+
+**Backlog view.** *Plugin side built* (cache, `backlog` and `work-item` data, Sync, Assign to agent); the pages in `ui/src` are separate work. Design and contract in `doc/plans/2026-11-17-backlog-view.md`.
+
+**A9. Pull request tools in the plugin (P1, M).** Builders and reviewers open pull requests, read threads and reply with curl and a personal access token (`ADO_GIT_PAT`) from their `TOOLS.md`. That is the most fragile step of the flow, puts a token in every agent, and nothing enforces the `[Name]` signature. Add plugin tools: create a pull request (linked to its work items), list threads, post a thread (optionally on a file and line), reply on a thread. Signed and logged like the other A8 tools, with role rights (builder creates; builder, reviewer and Josh-facing roles comment). *Done (19 November 2026):* `ado_create_pull_request`, `ado_get_pr_threads` and `ado_post_pr_comment` (thread or reply, file and line, thread status); see "A8: agent tools" in `doc/plans/2026-11-14-ado-integration.md`. Agents keep `ADO_GIT_PAT` only for git (clone, fetch, push); a plugin tool for the diff would remove it from reviewers and QA too.
+
+**A10. Smoke-test Epic from the plugin (P2, S-M).** A button on the ADO plugin page that creates (or resets) a standard smoke-test Epic in the test project, written to exercise every path: a review that must ask for a change, a QA failure that files a Defect, a Document reviewed as a pull request. Run it after each plugin or server change instead of writing a test Epic by hand. Reset closes the previous smoke-test items (Removed) so the board stays clean.
+
+**A11. Port the workflow to the real AI Team (P1, M).** The test agents (Rowan, Maple, Juniper, Willow) hold the proven flow; Tiamat, Orochi, Ryujin, Ladon and the engineers still have the old instructions. Rewrite theirs from the test agents', point the `story-workflow` skill at `ado_get_workflow` instead of repeating the rules (one source), and add a director and an architect to the test team so Documenting, Technical Notes and the Document pull request flow are tested before go-live. Do after A9 so the real team never needs the curl recipes.
+
+Dropped (19 November 2026): a dedicated ADO field for review and QA instructions (only the smoke test needs them; A10 covers it), and moving the test agents to a stronger model (the test project's output quality does not matter).
 
 Open questions: which ADO projects first; the exact "ready for an agent" signal; whether agents should be allowed to create ADO items through the plugin or only through MCP.
 
@@ -144,7 +161,7 @@ Mostly drawn from what the pilot showed in `../PAPERCLIP-PILOT.md` (sections 3.9
 - *Self-update:* agents can already edit their own managed files directly. Change this so instruction changes can only happen as a pull request into the repo, with the run and agent recorded in the PR. Since the current editor keeps no revision history, git is the history.
 *Decided:* git is the source of truth. An agent never changes its own live files directly; it proposes the change as a pull request into the repo, you merge it, and the sync job applies the merged version to the agent. Live files that differ from git are drift, reported and corrected from git. Design points for the build: block or ignore direct self-edits to instruction files (agents may still keep personal notes in their other files), define which repo and branch the PRs target, and decide how an agent's PR to its own instructions is reviewed (you merge; no agent approves its own change).
 
-**D4. Notifications when an agent needs you (P2, M).** Events: an agent blocked on a question, an approval requested, a failed run, a budget stop, a PR waiting for you to merge. In-app: badge and entries in the existing inbox. Windows notifications: spike the options (browser notifications, which need permission and an open tab; an installable web app; or forwarding to Teams/email). The UI already runs over HTTPS behind Caddy, which browser notifications require.
+**D4. Notifications when an agent needs you (P2, M).** Events: an agent blocked on a question, an approval requested, a failed run, a budget stop, a PR waiting for you to merge, and the ADO states that wait for Josh (Epic Plan Review, Feature Ready For Approval, Story Ready To Merge, Document In Review, anything Blocked). Josh prefers in-app and Windows notifications over Teams or Slack (19 November 2026). In-app: badge and entries in the existing inbox. Windows notifications: spike the options (browser notifications, which need permission and an open tab; an installable web app; or forwarding to Teams/email). The UI already runs over HTTPS behind Caddy, which browser notifications require.
 
 **D5. Per-agent skills, connectors and environment variables (P2, discovery).** The UI manages all three (and the Advanced YAML covers them) but day-to-day management is painful. We will go through each one when we reach it and fix it for per-agent use. Starting list of known pain from the pilot: secret reference syntax and the picker are unclear; where MCP servers are configured and whether they are found from worktrees (one server showed "Pending approval" but worked); skills need re-importing to stay in sync; no overview of which agent has which skill, connector or variable. Output of this item is a written pain-point list; fixes become their own items.
 
@@ -155,7 +172,8 @@ Mostly drawn from what the pilot showed in `../PAPERCLIP-PILOT.md` (sections 3.9
 **D8. Docs publisher as a scheduled job (P2, M).** A plain job (no agent, no tokens) that converts merged Grimoire documents and publishes them to Confluence, including Mermaid diagrams, on merge to `main`. Open: whether Confluence accepts Markdown or needs its storage format, how Mermaid is rendered, and how the job maps to Grimoire's layout after C2.
 
 **D9. Cost and usage visibility (P2, M-L).**
-- Cost and tokens per run, task, agent and Feature, shown in the UI and written back to the ADO work item.
+- Cost and tokens per run, task, agent and Feature, shown in the UI and written back to the ADO work item (with A4's roll-ups, the plugin can write a Feature's total when it completes).
+- Even on the subscription, an API-price estimate per Feature, to judge whether the API or the subscription is cheaper.
 - Budget alerts before a hard stop (links to D4).
 - Model routing rules: Sonnet by default, Opus only for architecture work or after repeated failures.
 - Subscription breakdown: usage against the Claude subscription, by agent, task and day. Unknown how much of this is available. Run logs show context size, not billing, and the pilot never confirmed how subscription runs are reported. First step: find out what data exists (run logs, the CLI, the Claude usage page). If subscription limits are not exposed, estimate from tokens per run and compare against the Claude usage page by hand.

@@ -112,6 +112,41 @@ describe("ADO client", () => {
     expect(String(err.message)).not.toContain("secret-pat");
   });
 
+  it("reads a pull request (also without a repository), its work items and its live comments", async () => {
+    const urls: string[] = [];
+    const bodies: Record<string, unknown> = {
+      pr: { pullRequestId: 403, title: "T", status: "completed", sourceRefName: "refs/heads/ai/x", targetRefName: "refs/heads/main", repository: { id: "r1", name: "SimpleRepo" } },
+      workitems: { value: [{ id: "804", url: "u" }, { id: "x" }] },
+      threads: {
+        value: [
+          { id: 1, comments: [{ id: 1, content: "c1", commentType: "text", author: { displayName: "Josh" } }, { id: 2, isDeleted: true }], threadContext: { filePath: "/a.md", rightFileStart: { line: 4 } } },
+          { id: 2, isDeleted: true, comments: [{ id: 1, content: "gone" }] },
+          { id: 3, comments: [{ id: 1, content: "vote", commentType: "system" }], threadContext: null },
+        ],
+      },
+    };
+    const client = new AdoClient({
+      orgUrl: ORG,
+      project: "AI Testing",
+      pat: "p",
+      fetch: async (url) => {
+        urls.push(url);
+        const kind = url.includes("/threads") ? "threads" : url.includes("/workitems") ? "workitems" : "pr";
+        return new Response(JSON.stringify(bodies[kind]), { status: 200 });
+      },
+    });
+    expect(await client.getPullRequest(null, 403)).toEqual({
+      pullRequestId: 403, title: "T", status: "completed", repositoryId: "r1", repositoryName: "SimpleRepo", sourceBranch: "ai/x", targetBranch: "main",
+    });
+    expect(urls[0]).toBe(`${ORG}/AI%20Testing/_apis/git/pullrequests/403?api-version=7.1`);
+    expect(await client.listPullRequestWorkItemIds("r1", 403)).toEqual([804]);
+    expect(urls[1]).toBe(`${ORG}/AI%20Testing/_apis/git/repositories/r1/pullRequests/403/workitems?api-version=7.1`);
+    expect(await client.listPullRequestComments("r1", 403)).toEqual([
+      { threadId: 1, commentId: 1, author: "Josh", content: "c1", commentType: "text", publishedDate: null, filePath: "/a.md", line: 4 },
+      { threadId: 3, commentId: 1, author: "", content: "vote", commentType: "system", publishedDate: null, filePath: null, line: null },
+    ]);
+  });
+
   it("queries changed items with time precision and batches summaries by 200", async () => {
     const bodies: any[] = [];
     const urls: string[] = [];
@@ -147,10 +182,11 @@ describe("plugin runtime", () => {
     changedBy?: string;
   }
 
-  function setup(ado: FakeAdo = {}) {
+  function setup(ado: FakeAdo = {}, now?: () => number) {
     const listeners: Array<{ connection: string; queue: string; handlers: ListenerHandlers; closed: boolean }> = [];
     const plugin = createAdoPlugin({
       recoveryDelayMs: 0,
+      ...(now ? { now } : {}),
       listenerFactory: (connection, queue, handlers) => {
         const l = { connection, queue, handlers, closed: false };
         listeners.push(l);
@@ -231,7 +267,8 @@ describe("plugin runtime", () => {
   });
 
   it("pages a large catch-up by change date and moves the watermark as it goes", async () => {
-    const s = setup();
+    // Fixed clock: the fake items are dated 2026-11-10 and must fall inside the first 7-day look-back.
+    const s = setup({}, () => Date.parse("2026-11-15T00:00:00Z"));
     let calls = 0;
     const wiqlBodies: any[] = [];
     const realFetch = globalThis.fetch;
@@ -323,12 +360,11 @@ describe("plugin runtime", () => {
     expect((await h.onMessage({ ...workItemUpdated, resource: { workItemId: 500 } }, { messageId: "m", deliveryCount: 9 })).delayMs).toBe(50_000);
   });
 
-  it("ignores events caused by the service account itself", async () => {
+  it("handles events caused by the service account too: one agent's change can be another agent's news", async () => {
     const s = setup({ changedBy: "AI Service" });
     await start(s);
-    const before = s.harness.getState({ scopeKind: "company", scopeId: CO, stateKey: "last-event" });
     expect((await s.listeners[0]!.handlers.onMessage(workItemUpdated, { messageId: "m", deliveryCount: 1 })).outcome).toBe("complete");
-    expect(s.harness.getState({ scopeKind: "company", scopeId: CO, stateKey: "last-event" })).toEqual(before);
+    expect(s.harness.getState({ scopeKind: "company", scopeId: CO, stateKey: "last-event" })).toMatchObject({ eventType: "workitem.updated" });
   });
 
   it("shows listener errors in status and health until a message gets through", async () => {

@@ -30,11 +30,16 @@
   "license": "MIT",
   "dependencies": {
     "@azure/service-bus": "^7.10.0",
-    "@paperclipai/plugin-sdk": "workspace:*"
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "mdast-util-from-markdown": "^2.0.2",
+    "mdast-util-gfm": "^3.1.0",
+    "micromark-extension-gfm": "^3.0.0",
+    "turndown": "^7.2.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/react": "^19.2.18",
+    "@types/turndown": "^5.0.6",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"

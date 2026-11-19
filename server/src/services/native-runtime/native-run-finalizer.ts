@@ -109,6 +109,7 @@ import {
   isNativeRunnerOwnershipHeld,
 } from "./native-runner-ownership.js";
 import { crashPoint } from "@paperclipai/shared/crash-points";
+import { isLinkedTaskOriginKind } from "@paperclipai/shared";
 
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -1556,6 +1557,7 @@ export async function finalizeNativeRun(input: {
           }) || (await readInheritedGitHubReviewWait(input.db, run))?.kind === "published" : false,
       boardResponseWaitAuthorized: boardResponseWait !== null,
       boardResponseWaitOrigin: boardResponseWaitOrigin !== null,
+      externalItemWakesTask: isLinkedTaskOriginKind(authoritativeIssue.originKind),
       isConversation: isConversation(authoritativeIssue),
       hasActivePauseHold: pauseHold !== null,
       contextCompactionRun: isContextCompactionRun(run.contextSnapshot),

@@ -153,6 +153,11 @@ export function arbitrateNativeStatus(input: {
   monitorWaitSuperseded?: boolean;
   boardResponseWaitAuthorized?: boolean;
   boardResponseWaitOrigin?: boolean;
+  /**
+   * Chimera fork: the task is linked to an external item (an ADO work item) whose
+   * plugin wakes the assignee whenever the item or its pull request changes.
+   */
+  externalItemWakesTask?: boolean;
   isConversation?: boolean;
   hasActivePauseHold?: boolean;
   /** The run only compacted the agent's context; it carries no task outcome. */
@@ -658,6 +663,25 @@ export function arbitrateNativeStatus(input: {
       unblockDescriptor: null,
       // An answered native plan is not task completion or permission to
       // change modes. Only a new explicit user cause may continue the work.
+      effects: [],
+    };
+  }
+  // Chimera fork: waiting for a response on a task linked to an external item
+  // parks it in review. The plugin wakes the agent when someone else changes the
+  // item, so re-running the agent now would only repeat the wait (it looped,
+  // waking a planner every few seconds while it waited for Josh's approval).
+  if (
+    input.externalItemWakesTask === true &&
+    input.assessment.reportedDisposition === "yielded" &&
+    input.assessment.continuation?.kind === "response_wake" &&
+    !unfinishedResponseWait
+  ) {
+    return {
+      policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION,
+      statusAction: "in_review",
+      toStatus: "in_review",
+      reasonCode: "external_item_response_waiting",
+      unblockDescriptor: null,
       effects: [],
     };
   }

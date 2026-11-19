@@ -185,6 +185,28 @@ describe("native status authority", () => {
       });
     }
   });
+  it("parks a response wait in review when an external item's plugin wakes the task (Chimera fork)", () => {
+    const passive = assessment({
+      reportedDisposition: "yielded",
+      continuation: { kind: "response_wake", summary: "Wait for Josh to approve the breakdown in ADO", idempotencyKey: "ado-813-approval" },
+    });
+    expect(arbitrate({ assessment: passive, externalItemWakesTask: true })).toEqual(
+      expect.objectContaining({ statusAction: "in_review", toStatus: "in_review", reasonCode: "external_item_response_waiting", effects: [] }),
+    );
+    // Without the link it still continues at once (upstream behaviour).
+    expect(arbitrate({ assessment: passive })).toMatchObject({ reasonCode: "live_continuation_registered" });
+    // An authorized Board wait keeps its own handling.
+    expect(arbitrate({ assessment: passive, externalItemWakesTask: true, boardResponseWaitAuthorized: true })).toMatchObject({
+      reasonCode: "board_response_waiting",
+    });
+    // Unfinished blocking work, monitors and other continuation kinds are not parked.
+    expect(
+      arbitrate({ assessment: { ...passive, hasBlockingRemainingWork: true }, externalItemWakesTask: true }).reasonCode,
+    ).not.toBe("external_item_response_waiting");
+    expect(
+      arbitrate({ assessment: { ...passive, continuation: { ...passive.continuation!, kind: "same_agent" } }, externalItemWakesTask: true }),
+    ).toMatchObject({ reasonCode: "live_continuation_registered" });
+  });
   it("repairs unfinished response waits once using the server continuation budget", () => {
     const unfinished = assessment({
       reportedDisposition: "yielded", hasBlockingRemainingWork: true,

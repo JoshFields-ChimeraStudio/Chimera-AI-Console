@@ -9594,7 +9594,10 @@ registry.registerPath({
   method: "get",
   path: "/api/plugins/tools",
   tags: ["plugins"],
-  summary: "List plugin tools",
+  summary: "List plugin tools (for example the Azure DevOps ADO work item tools)",
+  description:
+    "Plugin tools an agent may call, each with its full name, description and parametersSchema. " +
+    "Call one with POST /api/plugins/tools/execute.",
   responses: { 200: r.ok(), 401: r.unauthorized },
 });
 
@@ -9602,18 +9605,24 @@ registry.registerPath({
   method: "post",
   path: "/api/plugins/tools/execute",
   tags: ["plugins"],
-  summary: "Execute a plugin tool",
+  summary: "Execute (invoke, call) a plugin tool",
+  description:
+    "Run a plugin tool listed by GET /api/plugins/tools, for example the Azure DevOps tools. " +
+    "Body: tool (the full name from the list, such as chimera.plugin-ado:ado_get_work_item) and parameters (matching the tool's parametersSchema). " +
+    "An agent may omit runContext; its own agent, run and company are used.",
   request: {
     body: jsonBody(
       z.object({
         tool: z.string(),
         parameters: z.record(z.string(), z.unknown()).optional(),
-        runContext: z.object({
-          agentId: z.string(),
-          runId: z.string(),
-          companyId: z.string(),
-          projectId: z.string().nullable().optional(),
-        }),
+        runContext: z
+          .object({
+            agentId: z.string(),
+            runId: z.string(),
+            companyId: z.string(),
+            projectId: z.string().nullable().optional(),
+          })
+          .optional(),
       }),
     ),
   },

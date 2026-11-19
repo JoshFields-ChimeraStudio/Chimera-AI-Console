@@ -24,6 +24,7 @@ import {
   GanttChartSquare,
   LayoutGrid,
   Users,
+  ListTree,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -44,6 +45,7 @@ import { instanceSettingsApi } from "../api/instanceSettings";
 import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
+import { useAdoPlugin } from "../hooks/useBacklog";
 import { useStreamlinedUiEnabled } from "../hooks/useStreamlinedUiEnabled";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -66,6 +68,7 @@ function ClassicSidebar({ children }: { children?: ReactNode }) {
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
   const [workOpen, setWorkOpen] = useState(true);
+  const showBacklog = useAdoPlugin().plugin !== null;
   const [organizationOpen, setOrganizationOpen] = useState(true);
   const { selectedCompanyId, selectedCompany } = useCompany();
   const { collapsed, peeking } = useSidebar();
@@ -230,6 +233,7 @@ function ClassicSidebar({ children }: { children?: ReactNode }) {
           ) : (
             <SidebarNavItem to="/issues" label="Tasks" icon={CircleCheck} />
           )}
+          {showBacklog ? <SidebarNavItem to="/backlog" label="Backlog" icon={ListTree} /> : null}
           {streamlinedUiEnabled ? (
             <>
               <SidebarNavItem to="/projects" label="Projects" icon={FolderOpen} />

@@ -279,6 +279,62 @@ function mergeRuns(
   });
 }
 
+export type RunSessionGroup = {
+  /** Agent and session the run belongs to. */
+  key: string;
+  sessionId: string | null;
+  agentId: string;
+  /** Runs in the session, oldest first. */
+  runIds: string[];
+  /** The newest run of the session: the group's header goes above it. */
+  headRunId: string;
+  /** Why the session started, from its oldest run. */
+  startReason: string;
+  /** The provider started a new conversation although the task session was meant to be resumed. */
+  providerRestarted: boolean;
+};
+
+/**
+ * Fork patch (Chimera): group a task's runs by agent session, so the ledger
+ * shows where a session ended and why the next one started.
+ */
+export function groupRunsBySession(runs: ReadonlyArray<Pick<LedgerRun, "runId" | "agentId" | "createdAt" | "startedAt" | "sessionId" | "sessionStartReason" | "sessionResumedTaskSession" | "sessionEvent">>) {
+  const ordered = [...runs].sort((a, b) => {
+    const at = new Date(a.startedAt ?? a.createdAt).getTime();
+    const bt = new Date(b.startedAt ?? b.createdAt).getTime();
+    return at !== bt ? at - bt : a.runId.localeCompare(b.runId);
+  });
+  const groups = new Map<string, RunSessionGroup>();
+  const byRun = new Map<string, RunSessionGroup>();
+  for (const run of ordered) {
+    const key = run.sessionId ? `${run.agentId}:${run.sessionId}` : `${run.agentId}:run:${run.runId}`;
+    let group = groups.get(key);
+    if (!group) {
+      const providerRestarted = run.sessionResumedTaskSession === true && run.sessionEvent === "started";
+      group = {
+        key,
+        sessionId: run.sessionId ?? null,
+        agentId: run.agentId,
+        runIds: [],
+        headRunId: run.runId,
+        startReason: run.sessionStartReason
+          ? run.sessionStartReason
+          : run.sessionResumedTaskSession === true
+            ? "continued a session from earlier runs"
+            : run.sessionId
+              ? "reason not recorded (run predates session tracking)"
+              : "no session recorded for this run",
+        providerRestarted,
+      };
+      groups.set(key, group);
+    }
+    group.runIds.push(run.runId);
+    group.headRunId = run.runId;
+    byRun.set(run.runId, group);
+  }
+  return byRun;
+}
+
 function statusLabel(status: string) {
   return status.replace(/_/g, " ");
 }
@@ -627,6 +683,7 @@ export function IssueRunLedgerContent({
       ) ?? null,
     [ledgerRuns],
   );
+  const sessionByRun = useMemo(() => groupRunsBySession(ledgerRuns), [ledgerRuns]);
   const children = childIssueSummary(childIssues);
   const canRenderActivityEvents = Boolean(renderActivityEvent);
   const feedItems = useMemo<LedgerFeedItem[]>(() => {
@@ -857,9 +914,32 @@ export function IssueRunLedgerContent({
             const sourceResolvedFold = readSourceResolvedWatchdogFold(
               run.resultJson,
             );
+            const session = sessionByRun.get(run.runId);
+            const sessionHeader = session?.sessionId && session.headRunId === run.runId ? (
+              <div
+                data-testid="run-session-header"
+                className="flex flex-wrap items-center gap-1.5 px-1 pt-2 text-(length:--text-micro) text-muted-foreground"
+              >
+                <span className="font-medium text-foreground">Session</span>
+                <span className="font-mono text-foreground" title={session.sessionId ?? undefined}>
+                  {session.sessionId.slice(0, 8)}
+                </span>
+                <span>· {agentName}</span>
+                <span>
+                  · {session.runIds.length} run{session.runIds.length === 1 ? "" : "s"}
+                </span>
+                <span className="min-w-0 break-words">· started: {session.startReason}</span>
+                {session.providerRestarted ? (
+                  <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-amber-700 dark:text-amber-300">
+                    provider could not resume the saved conversation
+                  </span>
+                ) : null}
+              </div>
+            ) : null;
             return (
+              <div key={`run:${run.runId}`}>
+              {sessionHeader}
               <article
-                key={`run:${run.runId}`}
                 className="space-y-1.5 rounded-lg border border-border/60 px-3 py-2 text-xs text-muted-foreground"
               >
                 <div className="flex flex-wrap items-center gap-1.5">
@@ -939,6 +1019,16 @@ export function IssueRunLedgerContent({
                   <span className="ml-auto shrink-0">
                     {relativeTime(item.timestamp)}
                   </span>
+                  {run.sessionId ? (
+                    <span
+                      data-testid="run-session-id"
+                      className="rounded-md border border-border px-1.5 py-0.5 font-mono text-(length:--text-micro) text-muted-foreground"
+                      title={`Session ${run.sessionId}${run.sessionEvent ? ` (${run.sessionEvent})` : ""}`}
+                    >
+                      {run.sessionId.slice(0, 8)}
+                      {run.sessionEvent ? ` · ${run.sessionEvent}` : ""}
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     className="rounded-md border border-border px-1.5 py-0.5 text-(length:--text-micro) text-foreground hover:bg-accent/40"
@@ -1011,6 +1101,7 @@ export function IssueRunLedgerContent({
                   </div>
                 ) : null}
               </article>
+              </div>
             );
           })}
           {feedItems.length > 20 ? (

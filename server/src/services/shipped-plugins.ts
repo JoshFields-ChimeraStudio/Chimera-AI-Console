@@ -228,11 +228,57 @@ export async function ensureShippedPlugins(
   return outcomes;
 }
 
+/**
+ * Plugin keys of the shipped plugins this server reconciled at startup (every
+ * outcome except `skipped` and `failed`). The tool access policy reads this set
+ * to allow agents the tools of shipped plugins by default (reason
+ * `allow_shipped_plugin`); it also checks that the plugin is `ready`. Empty
+ * until the reconcile has run, and always empty in managed mode, where no
+ * shipped plugin source is used.
+ */
+let reconciledShippedPluginKeys: ReadonlySet<string> = new Set();
+/** Plugin key → the absolute path of the copy that ships with this server. */
+let reconciledShippedPluginPaths: ReadonlyMap<string, string> = new Map();
+
+export function shippedPluginKeys(): ReadonlySet<string> {
+  return reconciledShippedPluginKeys;
+}
+
+/**
+ * The shipped copy's path for a reconciled plugin key. Trust (for example default agent
+ * tool access) requires the installed record to point at this path, so a different
+ * package installed by hand under the same key is not trusted.
+ */
+export function shippedPluginPackagePath(pluginKey: string): string | null {
+  return reconciledShippedPluginPaths.get(pluginKey) ?? null;
+}
+
+/**
+ * True when an installed plugin record is the shipped copy this server reconciled:
+ * its key is on the list, it is ready, and it points at the copy that ships with the
+ * server (not another package installed by hand under the same key). The one test
+ * for every trust a shipped plugin gets beyond an ordinary plugin.
+ */
+export function isTrustedShippedPluginRecord(record: { pluginKey: string; status: string | null; packagePath: string | null }): boolean {
+  if (record.status !== "ready" || !reconciledShippedPluginKeys.has(record.pluginKey)) return false;
+  const shippedPath = reconciledShippedPluginPaths.get(record.pluginKey);
+  return !!shippedPath && !!record.packagePath && path.resolve(record.packagePath) === shippedPath;
+}
+
+/** Test hook: replace the reconciled set with [pluginKey, packagePath] pairs. */
+export function setShippedPluginKeysForTest(entries: Iterable<readonly [string, string]>): void {
+  const pairs = [...entries].map(([key, packagePath]) => [key, path.resolve(packagePath)] as const);
+  reconciledShippedPluginKeys = new Set(pairs.map(([key]) => key));
+  reconciledShippedPluginPaths = new Map(pairs);
+}
+
 /** Resolve and reconcile in one step; fail-safe (a bad list only logs). */
 export async function reconcileShippedPlugins(
   source: ShippedPluginSource | null,
   deps: ShippedPluginReconcileDeps,
 ): Promise<ShippedPluginOutcome[]> {
+  reconciledShippedPluginKeys = new Set();
+  reconciledShippedPluginPaths = new Map();
   if (!source) return [];
   let plugins: ShippedPlugin[];
   try {
@@ -241,5 +287,13 @@ export async function reconcileShippedPlugins(
     deps.logger.error({ err, listPath: source.listPath }, "Failed to read the shipped plugin list; no shipped plugins reconciled");
     return [];
   }
-  return ensureShippedPlugins(plugins, deps);
+  const outcomes = await ensureShippedPlugins(plugins, deps);
+  const localPathByName = new Map(plugins.map((plugin) => [plugin.name, path.resolve(plugin.localPath)]));
+  const trusted = outcomes
+    .filter((outcome) => outcome.action !== "skipped" && outcome.action !== "failed" && outcome.pluginKey)
+    .map((outcome) => [outcome.pluginKey!, localPathByName.get(outcome.name)!] as const)
+    .filter(([, localPath]) => !!localPath);
+  reconciledShippedPluginKeys = new Set(trusted.map(([key]) => key));
+  reconciledShippedPluginPaths = new Map(trusted);
+  return outcomes;
 }
