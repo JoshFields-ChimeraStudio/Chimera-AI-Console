@@ -137,6 +137,8 @@ describe("ADO client", () => {
     });
     expect(await client.getPullRequest(null, 403)).toEqual({
       pullRequestId: 403, title: "T", status: "completed", repositoryId: "r1", repositoryName: "SimpleRepo", sourceBranch: "ai/x", targetBranch: "main",
+      // A5: what the task's pull request tab shows.
+      projectId: "", isDraft: false, mergeStatus: "", createdBy: "", creationDate: null, closedDate: null, reviewers: [],
     });
     expect(urls[0]).toBe(`${ORG}/AI%20Testing/_apis/git/pullrequests/403?api-version=7.1`);
     expect(await client.listPullRequestWorkItemIds("r1", 403)).toEqual([804]);

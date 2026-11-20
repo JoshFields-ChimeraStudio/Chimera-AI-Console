@@ -30,6 +30,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "plugin.state.read",
     "plugin.state.write",
     "ui.dashboardWidget.register",
+    "ui.detailTab.register",
     "agent.tools.register",
     "agents.read",
     "activity.log.write",
@@ -164,10 +165,23 @@ const manifest: PaperclipPluginManifestV1 = {
         exportName: "AdoSmokeTest",
       },
       {
+        type: "dashboardWidget",
+        id: "ado-builder-queues",
+        displayName: "Builder queues",
+        exportName: "AdoBuilderQueues",
+      },
+      {
         type: "globalToolbarButton",
         id: "ado-needs-josh",
         displayName: "Azure DevOps: needs you",
         exportName: "AdoNeedsJosh",
+      },
+      {
+        type: "detailTab",
+        id: "ado-pull-request",
+        displayName: "Pull request",
+        exportName: "AdoPullRequestTab",
+        entityTypes: ["issue"],
       },
       {
         type: "toolbarButton",

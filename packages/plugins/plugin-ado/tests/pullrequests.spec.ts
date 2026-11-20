@@ -53,7 +53,12 @@ function setup(
     agents: { get: vi.fn(async (id: string) => ({ id, name: id === "maple" ? "Maple" : id === "juniper" ? "Juniper" : id })) },
     logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
   };
-  const notifier = createPullRequestNotifier({ ctx: ctx as any, findTaskForWorkItem: async (_c, id) => tasks[id] ?? null });
+  const merged: number[] = [];
+  const notifier = createPullRequestNotifier({
+    ctx: ctx as any,
+    findTaskForWorkItem: async (_c, id) => tasks[id] ?? null,
+    onMerged: async (_c, p) => void merged.push(p.pullRequestId),
+  });
   const run = () => notifier.onPullRequestEvent(CO, ado, { pullRequestId: 403, repositoryId: REPO });
   return {
     pr,
@@ -61,6 +66,7 @@ function setup(
     issues,
     state,
     run,
+    merged,
     setComments: (c: AdoPullRequestComment[]) => void (comments = c),
   };
 }
@@ -150,6 +156,20 @@ describe("pull request notifications", () => {
     expect(s.issues.requestWakeup.mock.calls[0]![2]).toMatchObject({ reason: PR_WAKE_REASONS.completed, idempotencyKey: "ado-pr:repo-1:403:completed" });
     expect((await s.run()).statusChanged).toBe(false);
     expect(s.issues.createComment).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a merge once, for the Stories waiting on it (A5)", async () => {
+    const s = setup();
+    await s.run();
+    expect(s.merged).toEqual([]);
+    s.pr.status = "completed";
+    await s.run();
+    await s.run();
+    expect(s.merged).toEqual([403]);
+    const abandoned = setup();
+    abandoned.pr.status = "abandoned";
+    await abandoned.run();
+    expect(abandoned.merged).toEqual([]);
   });
 
   it("announces an abandoned pull request, and not comments on a closed one", async () => {

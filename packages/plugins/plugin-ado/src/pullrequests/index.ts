@@ -3,6 +3,9 @@
  * completed or abandoned, or when anyone else (a person or another agent)
  * comments on it.
  *
+ * When a pull request is merged, the Stories that depend on its work item may start (A6 routing,
+ * through `onMerged`).
+ *
  * Pull request events are signals only, like work item events: the PR, its
  * linked work items and its comments are re-read from ADO each time, and
  * plugin state records what was already announced, so a redelivered,
@@ -29,6 +32,8 @@ export interface PullRequestReader {
 export interface PullRequestDeps {
   ctx: Pick<PluginContext, "state" | "issues" | "agents" | "logger">;
   findTaskForWorkItem(companyId: string, workItemId: number): Promise<Issue | null>;
+  /** A5: called once when a pull request is first seen completed (merged), after the notices. */
+  onMerged?(companyId: string, pr: AdoPullRequest): Promise<void>;
 }
 
 /** What has been announced for one pull request. */
@@ -229,6 +234,9 @@ export function createPullRequestNotifier(deps: PullRequestDeps) {
         notifiedTasks.push(task.id);
       }
     }
+
+    // A5: Stories that depend on this one may start now (its code is merged).
+    if (statusChanged && pr.status === "completed" && deps.onMerged) await deps.onMerged(companyId, pr);
 
     // Saved last: if a notice failed, the redelivered event tries again.
     const record: PullRequestRecord = {

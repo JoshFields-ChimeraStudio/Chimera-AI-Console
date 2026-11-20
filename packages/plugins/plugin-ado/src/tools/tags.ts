@@ -31,3 +31,26 @@ export function hasOnlyAgentTag(currentTags: unknown, agentName: string): boolea
   const agentTags = splitTags(currentTags).filter((t) => t.toLowerCase().startsWith(AGENT_TAG_PREFIX));
   return agentTags.length === 1 && agentTags[0]!.toLowerCase() === agentTag(agentName).toLowerCase();
 }
+
+/** Tags the plugin manages through their own parameters (A7 agent, A12 repo, A6 builder and for). */
+export const RESERVED_TAG_PREFIXES = ["agent:", "repo:", "builder:", "for:"] as const;
+
+/** A tag as ADO can store it: no ";" or ",", single spaces. */
+export function cleanTag(tag: string): string {
+  return tag.replace(/[;,]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function isReservedTag(tag: string): boolean {
+  const t = tag.trim().toLowerCase();
+  return RESERVED_TAG_PREFIXES.some((p) => t.startsWith(p));
+}
+
+/** The tags with `add` added (if missing) and `remove` taken out, case-insensitively. */
+export function editTags(currentTags: unknown, add: string[], remove: string[]): string {
+  const removing = new Set(remove.map((t) => cleanTag(t).toLowerCase()));
+  const out = splitTags(currentTags).filter((t) => !removing.has(t.toLowerCase()));
+  for (const t of add.map(cleanTag).filter(Boolean)) {
+    if (!out.some((o) => o.toLowerCase() === t.toLowerCase())) out.push(t);
+  }
+  return out.join("; ");
+}

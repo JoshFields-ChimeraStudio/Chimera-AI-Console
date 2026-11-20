@@ -68,3 +68,19 @@ export function withInstructions(description: string | null, carried: CarriedIns
   const sections = carried.map((c) => `${INSTRUCTIONS_HEADING} (copied from #${c.sourceId}):\n${c.text}`);
   return [description?.trim(), ...sections].filter(Boolean).join("\n\n");
 }
+
+/**
+ * A new description for an item that keeps the item's "Instructions from Josh" section(s), when
+ * the new text leaves them out (ado_update_work_item, A11): agents may rewrite a description,
+ * not drop what Josh asked.
+ */
+export function keepInstructions(newDescription: string, currentHtml: unknown): string {
+  if (typeof currentHtml !== "string" || !currentHtml) return newDescription;
+  const text = htmlToText(currentHtml);
+  const m = HEADING.exec(text);
+  if (!m) return newDescription;
+  const section = text.slice(m.index).trim();
+  const body = extractInstructions(currentHtml);
+  if (!body || normalize(newDescription).includes(normalize(body))) return newDescription;
+  return `${newDescription.trim()}\n\n${section}`;
+}

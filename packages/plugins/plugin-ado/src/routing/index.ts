@@ -9,8 +9,9 @@
  *
  * When Josh sets a Feature Ready For Work, before its owner is woken, the plugin assigns every
  * "for:" item under it and as many tagged Stories as builders have room for: the builder of the
- * role with the fewest open Stories, in the order the route lists them. A Story whose description
- * says "Depends on #<id>" waits until that item is Completed (or Removed). When a Story or Bug is
+ * role with the fewest open Stories, in the order the route lists them. A Story that depends on
+ * another (a Predecessor link, or "Depends on #<id>" in its description) waits until that item is
+ * Completed or Removed, or, for a Story or Bug, until its pull request is merged (A5: the code it needs is on the target branch). When a Story or Bug is
  * finished, the next waiting Story gets the free slot. Stories without a builder tag, and anything
  * already assigned, stay with the director as before. The judgement of who suits a Story stays with
  * the planner; the plugin only follows the table and counts.
@@ -18,8 +19,11 @@
 import type { Agent, Issue, PluginContext } from "@paperclipai/plugin-sdk";
 import type { AdoClient, AdoWorkItem, WorkItemSummary } from "../ado/client.js";
 import type { Assigner } from "../backlog/assign.js";
+import { BacklogError } from "../backlog/errors.js";
 import type { PluginDeps } from "../deps.js";
 import type { LinkFeatures } from "../links/index.js";
+import { mergeState } from "../pullrequests/view.js";
+import { predecessorsOf } from "../workflow/dependencies.js";
 import { attributedHtml, htmlToText } from "../tools/html.js";
 import { FINAL_STATES, PLUGIN_SIGNATURE } from "../workflow/rules.js";
 
@@ -108,6 +112,22 @@ export interface RoutingOptions {
   routes(companyId: string): Promise<BuilderRoute[]>;
 }
 
+export interface HeldItem {
+  workItemId: number;
+  type: string;
+  title: string;
+  state: string;
+  issueId: string;
+}
+
+/** What the queue view shows (A6). */
+export interface BuilderQueues {
+  routes: Array<{ role: string; builders: Array<{ name: string; status: string; held: HeldItem[]; limit: number }> }>;
+  waiting: Array<{ workItemId: number; title: string; type: string; role: string; url: string; why: string }>;
+  /** Would start now (a missed routing pass); "Route now" starts them. */
+  ready: Array<{ workItemId: number; title: string; type: string; role: string; url: string; agent: string }>;
+}
+
 export interface RoutingResult {
   assigned: Array<{ workItemId: number; agent: string; why: string }>;
   waiting: Array<{ workItemId: number; why: string }>;
@@ -117,12 +137,12 @@ export function createRouter(options: RoutingOptions) {
   const { deps, links, assigner } = options;
   const ctx: PluginContext = deps.ctx;
   /** One pass per company at a time, so two finished Stories cannot both take the same free slot. */
-  const queues = new Map<string, Promise<unknown>>();
+  const passes = new Map<string, Promise<unknown>>();
 
   function serial<T>(companyId: string, fn: () => Promise<T>): Promise<T> {
-    const prev = queues.get(companyId) ?? Promise.resolve();
+    const prev = passes.get(companyId) ?? Promise.resolve();
     const next = prev.catch(() => undefined).then(fn);
-    queues.set(companyId, next);
+    passes.set(companyId, next);
     return next;
   }
 
@@ -137,15 +157,21 @@ export function createRouter(options: RoutingOptions) {
   }
 
   /** Open Stories and Bugs an agent holds: its open linked tasks whose work item is one. */
-  async function load(companyId: string, agentId: string): Promise<number> {
+  async function heldItems(companyId: string, agentId: string): Promise<HeldItem[]> {
     const tasks = await ctx.issues.list({ companyId, assigneeAgentId: agentId, limit: 500 } as never).catch(() => [] as Issue[]);
-    let n = 0;
+    const out: HeldItem[] = [];
     for (const t of tasks) {
       if (CLOSED_TASK.has(t.status)) continue;
       const link = await links.findLinkByIssue(companyId, t.id).catch(() => null);
-      if (link && BUILD_TYPES.has(lower(link.type)) && !isFinal(link.state)) n++;
+      if (link && BUILD_TYPES.has(lower(link.type)) && !isFinal(link.state)) {
+        out.push({ workItemId: link.workItemId, type: link.type, title: link.title ?? "", state: link.state, issueId: t.id });
+      }
     }
-    return n;
+    return out;
+  }
+
+  async function load(companyId: string, agentId: string): Promise<number> {
+    return (await heldItems(companyId, agentId)).length;
   }
 
   async function held(companyId: string, workItemId: number): Promise<boolean> {
@@ -190,7 +216,7 @@ export function createRouter(options: RoutingOptions) {
   }
 
   /** Start waiting Stories (oldest-ranked first) while builders have room. */
-  async function fill(companyId: string, ado: AdoClient, candidates: AdoWorkItem[], result: RoutingResult): Promise<void> {
+  async function fill(companyId: string, ado: AdoClient, candidates: AdoWorkItem[], result: RoutingResult, dryRun = false): Promise<void> {
     const routes = await options.routes(companyId);
     if (!routes.length) return;
     const agents = await agentsByName(companyId);
@@ -208,21 +234,29 @@ export function createRouter(options: RoutingOptions) {
       const parentId = Number(story.fields["System.Parent"] ?? 0);
       if (parentId) {
         if (!featureState.has(parentId)) featureState.set(parentId, lower((await ado.getWorkItem(parentId).catch(() => null))?.fields["System.State"]));
-        if (!ACTIVE_FEATURE_STATES.has(featureState.get(parentId)!)) continue;
+        if (!ACTIVE_FEATURE_STATES.has(featureState.get(parentId)!)) {
+          // Not routing's business until Josh approves the Feature; the queue view says why it waits.
+          if (dryRun) result.waiting.push({ workItemId: story.id, why: `its Feature #${parentId} is not approved yet` });
+          continue;
+        }
       }
       const route = routeFor(routes, role);
       if (!route) {
         result.waiting.push({ workItemId: story.id, why: `no route for builder role ${role}` });
         continue;
       }
-      const needs = dependenciesOf(story.fields["System.Description"]);
-      const open: number[] = [];
+      // A11: Predecessor links, and the older "Depends on #<id>" text.
+      const needs = [...new Set([...predecessorsOf(story), ...dependenciesOf(story.fields["System.Description"])])];
+      const open: string[] = [];
       for (const d of needs) {
         const s = await ado.getWorkItem(d).catch(() => null);
-        if (s && !isFinal(String(s.fields["System.State"] ?? ""))) open.push(d);
+        if (!s || isFinal(String(s.fields["System.State"] ?? ""))) continue;
+        // A5: a Story's or Bug's dependants may start once its pull request is merged.
+        if (BUILD_TYPES.has(lower(s.fields["System.WorkItemType"])) && (await mergeState(ado, s)) === "merged") continue;
+        open.push(BUILD_TYPES.has(lower(s.fields["System.WorkItemType"])) ? `#${d} to be merged` : `#${d} to finish`);
       }
       if (open.length) {
-        result.waiting.push({ workItemId: story.id, why: `depends on ${open.map((d) => `#${d}`).join(", ")}` });
+        result.waiting.push({ workItemId: story.id, why: `waits for ${open.join(" and ")}` });
         continue;
       }
       let best: { agent: Agent; load: number } | null = null;
@@ -242,9 +276,10 @@ export function createRouter(options: RoutingOptions) {
         continue;
       }
       const why = `builder role ${role}; ${best.agent.name} held ${best.load} of ${route.wipLimit} open Stories`;
-      await assign(companyId, ado, story, best.agent, why);
       loads.set(best.agent.id, best.load + 1);
       result.assigned.push({ workItemId: story.id, agent: best.agent.name, why });
+      if (dryRun) continue;
+      await assign(companyId, ado, story, best.agent, why);
       await assignChildren(companyId, ado, story, best.agent, agents, result);
     }
   }
@@ -277,26 +312,76 @@ export function createRouter(options: RoutingOptions) {
     });
   }
 
+  /** Tagged Stories and Bugs not started yet (state New), in backlog order. */
+  async function waitingStories(ado: AdoClient): Promise<AdoWorkItem[]> {
+    const ids = await ado.queryWorkItemIds(
+      "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.WorkItemType] IN ('User Story', 'Bug') " +
+        "AND [System.State] = 'New' ORDER BY [Microsoft.VSTS.Common.StackRank] ASC, [System.Id] ASC",
+      MAX_WAITING,
+    );
+    const items: AdoWorkItem[] = [];
+    for (const id of ids) {
+      const it = await ado.getWorkItem(id).catch(() => null);
+      if (it && builderRoleOf(it.fields["System.Tags"])) items.push(it);
+    }
+    return items;
+  }
+
   /** A Story or Bug finished (or anything that frees a builder): start the next waiting Stories. */
   async function fillSlots(companyId: string, reason: string): Promise<RoutingResult> {
     return serial(companyId, async () => {
       const result: RoutingResult = { assigned: [], waiting: [] };
       if (!(await options.routes(companyId)).length) return result;
       const ado = await deps.adoClient(companyId);
-      const ids = await ado.queryWorkItemIds(
-        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.WorkItemType] IN ('User Story', 'Bug') " +
-          "AND [System.State] = 'New' ORDER BY [Microsoft.VSTS.Common.StackRank] ASC, [System.Id] ASC",
-        MAX_WAITING,
-      );
-      const items: AdoWorkItem[] = [];
-      for (const id of ids) {
-        const it = await ado.getWorkItem(id).catch(() => null);
-        if (it && builderRoleOf(it.fields["System.Tags"])) items.push(it);
-      }
-      await fill(companyId, ado, items, result);
+      await fill(companyId, ado, await waitingStories(ado), result);
       if (result.assigned.length) log(companyId, reason, result);
       return result;
     });
+  }
+
+  /**
+   * A6 queue view: per builder route, what each builder holds against its limit, and the tagged
+   * Stories waiting with the reason routing gives. Assigns nothing: a Story it shows as ready
+   * starts on the next routing pass (a finished Story, a merge, a Feature approved, or "Route now").
+   */
+  async function queues(companyId: string): Promise<BuilderQueues> {
+    const routes = await options.routes(companyId);
+    if (!routes.length) return { routes: [], waiting: [], ready: [] };
+    const ado = await deps.adoClient(companyId);
+    const agents = await agentsByName(companyId);
+    const routeViews: BuilderQueues["routes"] = [];
+    for (const route of routes) {
+      const builders: BuilderQueues["routes"][number]["builders"] = [];
+      for (const name of route.agents) {
+        const a = agents.get(lower(name));
+        builders.push({
+          name: a?.name ?? name,
+          status: a ? a.status : "missing",
+          held: a ? await heldItems(companyId, a.id) : [],
+          limit: route.wipLimit,
+        });
+      }
+      routeViews.push({ role: route.role, builders });
+    }
+    const candidates = await waitingStories(ado);
+    const result: RoutingResult = { assigned: [], waiting: [] };
+    await fill(companyId, ado, candidates, result, true);
+    const byId = new Map(candidates.map((c) => [c.id, c]));
+    const describe = (id: number) => {
+      const it = byId.get(id);
+      return {
+        workItemId: id,
+        title: String(it?.fields["System.Title"] ?? ""),
+        type: String(it?.fields["System.WorkItemType"] ?? ""),
+        role: builderRoleOf(it?.fields["System.Tags"]) ?? "",
+        url: ado.webUrl(id),
+      };
+    };
+    return {
+      routes: routeViews,
+      waiting: result.waiting.filter((w) => byId.has(w.workItemId)).map((w) => ({ ...describe(w.workItemId), why: w.why })),
+      ready: result.assigned.map((r) => ({ ...describe(r.workItemId), agent: r.agent })),
+    };
   }
 
   function log(companyId: string, why: string, r: RoutingResult) {
@@ -311,7 +396,39 @@ export function createRouter(options: RoutingOptions) {
     else if (BUILD_TYPES.has(type) && isFinal(item.state)) await fillSlots(companyId, `#${item.id} is ${item.state}`);
   }
 
-  return { onStateChanged, releaseFeature, fillSlots };
+  return { onStateChanged, releaseFeature, fillSlots, queues };
 }
 
 export type Router = ReturnType<typeof createRouter>;
+
+export const QUEUE_DATA_KEY = "builder-queues";
+export const QUEUE_ACTION_KEYS = { routeNow: "builder-queues-route-now" } as const;
+
+export interface BuilderQueuesData extends BuilderQueues {
+  configured: boolean;
+  error?: string;
+}
+
+/** A6: the "Builder queues" dashboard widget's data, and its "Route now" button (board users only). */
+export function registerQueueView(deps: PluginDeps, router: Pick<Router, "queues" | "fillSlots">): void {
+  const { ctx } = deps;
+  const companyIdFrom = (params: Record<string, unknown>, fallback?: string | null) => {
+    const id = typeof params.companyId === "string" && params.companyId ? params.companyId : fallback;
+    if (!id) throw new BacklogError("companyId is required");
+    return id;
+  };
+  ctx.data.register(QUEUE_DATA_KEY, async (params): Promise<BuilderQueuesData> => {
+    const companyId = companyIdFrom(params);
+    if (!(await deps.settings(companyId))) return { configured: false, routes: [], waiting: [], ready: [] };
+    try {
+      return { configured: true, ...(await router.queues(companyId)) };
+    } catch (err) {
+      return { configured: true, routes: [], waiting: [], ready: [], error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ctx.actions.register(QUEUE_ACTION_KEYS.routeNow, async (params, context): Promise<RoutingResult> => {
+    const companyId = companyIdFrom(params, context?.companyId);
+    if (context?.actor?.type !== "user" || !context.actor.userId) throw new BacklogError("Only a board user can start routing");
+    return router.fillSlots(companyId, "Route now on the Builder queues widget");
+  });
+}

@@ -92,6 +92,33 @@ export interface AdoPullRequest {
   /** Branch names without "refs/heads/", or null when ADO did not return them. */
   sourceBranch: string | null;
   targetBranch: string | null;
+  /** A5: what the task's pull request view shows (absent from test fakes that do not need them). */
+  projectId?: string;
+  isDraft?: boolean;
+  /** succeeded, conflicts, queued, rejectedByPolicy, failure, notSet. */
+  mergeStatus?: string;
+  createdBy?: string;
+  creationDate?: string | null;
+  closedDate?: string | null;
+  reviewers?: AdoPullRequestReviewer[];
+}
+
+/** A reviewer on a pull request and their vote. */
+export interface AdoPullRequestReviewer {
+  name: string;
+  /** 10 approved, 5 approved with suggestions, 0 no vote, -5 waiting for the author, -10 rejected. */
+  vote: number;
+  isRequired: boolean;
+  /** A group (team) rather than a person. */
+  isContainer: boolean;
+}
+
+/** One branch policy's result on a pull request (build, required reviewers, linked work items...). */
+export interface AdoPolicyEvaluation {
+  name: string;
+  /** approved, rejected, running, queued, notApplicable, broken. */
+  status: string;
+  isBlocking: boolean;
 }
 
 /** One comment of a pull request thread. */
@@ -361,7 +388,13 @@ export class AdoClient {
       status?: string;
       sourceRefName?: string;
       targetRefName?: string;
-      repository?: { id?: string; name?: string };
+      repository?: { id?: string; name?: string; project?: { id?: string } };
+      isDraft?: boolean;
+      mergeStatus?: string;
+      createdBy?: { displayName?: string; uniqueName?: string };
+      creationDate?: string;
+      closedDate?: string;
+      reviewers?: Array<{ displayName?: string; uniqueName?: string; vote?: number; isRequired?: boolean; isContainer?: boolean }>;
     }>(`${path}?api-version=${ADO_API_VERSION}`);
     return {
       pullRequestId: pr.pullRequestId,
@@ -371,7 +404,37 @@ export class AdoClient {
       repositoryName: String(pr.repository?.name ?? ""),
       sourceBranch: branchName(pr.sourceRefName),
       targetBranch: branchName(pr.targetRefName),
+      projectId: String(pr.repository?.project?.id ?? ""),
+      isDraft: pr.isDraft === true,
+      mergeStatus: String(pr.mergeStatus ?? ""),
+      createdBy: String(pr.createdBy?.displayName ?? pr.createdBy?.uniqueName ?? ""),
+      creationDate: pr.creationDate ?? null,
+      closedDate: pr.closedDate ?? null,
+      reviewers: (pr.reviewers ?? []).map((r) => ({
+        name: String(r.displayName ?? r.uniqueName ?? ""),
+        vote: Number(r.vote ?? 0),
+        isRequired: r.isRequired === true,
+        isContainer: r.isContainer === true,
+      })),
     };
+  }
+
+  /** The branch policies' results on a pull request (A5). The policy API is still a preview in ADO. */
+  async listPolicyEvaluations(projectId: string, pullRequestId: number): Promise<AdoPolicyEvaluation[]> {
+    const artifactId = `vstfs:///CodeReview/CodeReviewId/${projectId}/${pullRequestId}`;
+    const res = await this.request<{
+      value?: Array<{
+        status?: string;
+        configuration?: { isBlocking?: boolean; isEnabled?: boolean; type?: { displayName?: string }; settings?: { displayName?: string } };
+      }>;
+    }>(`/_apis/policy/evaluations?artifactId=${encodeURIComponent(artifactId)}&api-version=${ADO_API_VERSION}-preview.1`);
+    return (res.value ?? [])
+      .filter((e) => e.configuration?.isEnabled !== false)
+      .map((e) => ({
+        name: String(e.configuration?.settings?.displayName || e.configuration?.type?.displayName || "Policy"),
+        status: String(e.status ?? "unknown"),
+        isBlocking: e.configuration?.isBlocking !== false,
+      }));
   }
 
   /** IDs of the work items linked to a pull request. */
@@ -438,7 +501,7 @@ export class AdoClient {
   /** Open a pull request, linked to the given work items. */
   async createPullRequest(
     repositoryId: string,
-    input: { sourceBranch: string; targetBranch: string; title: string; description: string; workItemIds: number[] },
+    input: { sourceBranch: string; targetBranch: string; title: string; description: string; workItemIds: number[]; labels?: string[] },
   ): Promise<AdoPullRequest> {
     const created = await this.request<{ pullRequestId: number }>(
       `/_apis/git/repositories/${encodeURIComponent(repositoryId)}/pullrequests?api-version=${ADO_API_VERSION}`,
@@ -451,6 +514,7 @@ export class AdoClient {
           title: input.title,
           description: input.description,
           workItemRefs: input.workItemIds.map((id) => ({ id: String(id) })),
+          ...(input.labels?.length ? { labels: input.labels.map((name) => ({ name })) } : {}),
         }),
       },
       { idempotent: false },

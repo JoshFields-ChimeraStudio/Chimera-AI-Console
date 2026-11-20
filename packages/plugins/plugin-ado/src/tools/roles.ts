@@ -21,11 +21,14 @@ const BUILD: readonly AdoToolName[] = [...REVIEW, T.linkPullRequest, T.createPul
 /** Technical notes: the roles that plan and architect. */
 const PLAN: readonly AdoToolName[] = [...BUILD, T.setTechnicalNotes];
 
-/** Roles that may create at least one type (from the workflow's creation table) get the create tool. */
+/**
+ * Roles that may create at least one type (from the workflow's creation table) get the create tool,
+ * and the update tool for the types they may create (A11).
+ */
 const CREATORS = new Set<AdoRole>([...CREATION_RULES.flatMap((r) => r.roles), ...OTHER_TYPE_CREATION.roles]);
 
 function policy(tools: readonly AdoToolName[], role: AdoRole): RolePolicy {
-  return { tools: CREATORS.has(role) ? [...tools, T.createWorkItem] : tools };
+  return { tools: CREATORS.has(role) ? [...tools, T.createWorkItem, T.updateWorkItem] : tools };
 }
 
 /**

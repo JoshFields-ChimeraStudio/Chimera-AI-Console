@@ -50,11 +50,12 @@ import {
 import { TOOL_DECLARATIONS, TOOL_NAMES, type AdoToolName } from "./definitions.js";
 import { attributedHtml, htmlToText, textToHtml } from "./html.js";
 import { ROLE_POLICIES, pruneBindings, resolveRole, roleAllows, type AdoRole, type RoleBindings, type RoleBindingStore } from "./roles.js";
-import { agentTag, hasOnlyAgentTag, withAgentTag } from "./tags.js";
+import { agentTag, cleanTag, editTags, hasOnlyAgentTag, isReservedTag, withAgentTag } from "./tags.js";
+import { DEPENDS_ON_REL, predecessorIndexes } from "../workflow/dependencies.js";
 import { repositoryOf, withRepositoryTag } from "../projects/index.js";
 import { unifiedDiff } from "./diff.js";
 import { BUILDER_TAG_PREFIX, FOR_TAG_PREFIX, withTag } from "../routing/index.js";
-import { MAX_ANCESTORS, instructionsToCarry, withInstructions } from "../workflow/instructions.js";
+import { MAX_ANCESTORS, instructionsToCarry, keepInstructions, withInstructions } from "../workflow/instructions.js";
 
 /** Work item type states change rarely; cache them briefly per company and type. */
 const STATE_CACHE_MS = 10 * 60 * 1000;
@@ -513,6 +514,7 @@ export function registerAgentTools(
       const forAgent = forName ? await findAgent(caller.run.companyId, forName).catch(() => null) : null;
       if (forName && !forAgent) throw new ToolFailure(`Nothing was created: there is no agent called "${forName}".`);
       const assignTo = optionalText(params.assignTo, "assignTo")?.trim() ?? null;
+      const dependsOn = idList(params.dependsOn, "dependsOn");
       const { role } = caller;
       // Refuse a type the role may not create before reading anything.
       if (!rolesThatMayCreate(type).includes(role)) throw new ToolFailure(denial(decideCreate({ role, type, parentType: null })));
@@ -573,6 +575,8 @@ export function registerAgentTools(
       // Josh's instructions on the items above travel down to the new one (workflow/instructions.ts).
       const carried = parent ? instructionsToCarry(type, description, await ancestorsOf(ado, parent)) : [];
       const fullDescription = withInstructions(description, carried);
+      // A11: what it waits for, as Predecessor links (checked to exist before anything is created).
+      for (const d of dependsOn) await withNotFound(ado.getWorkItem(d), `Nothing was created: work item #${d} in dependsOn was not found.`);
       const ops: JsonPatchOp[] = [
         { op: "add", path: "/fields/System.Title", value: title },
         ...(fullDescription ? [{ op: "add" as const, path: "/fields/System.Description", value: textToHtml(fullDescription) }] : []),
@@ -584,11 +588,12 @@ export function registerAgentTools(
         { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, parentId ? `Created as a child of #${parentId}.` : "Created.") },
         { op: "add", path: "/fields/System.Tags", value: routingTags(repository ? withRepositoryTag(agentTag(caller.agentName), repository) : agentTag(caller.agentName), builderRole, forAgent?.name ?? null) },
         ...(parentId ? [{ op: "add" as const, path: "/relations/-", value: { rel: "System.LinkTypes.Hierarchy-Reverse", url: ado.workItemApiUrl(parentId) } }] : []),
+        ...dependsOn.map((d) => ({ op: "add" as const, path: "/relations/-", value: { rel: DEPENDS_ON_REL, url: ado.workItemApiUrl(d) } })),
       ];
       const created = await ado.createWorkItem(type, ops);
       const where = parentId ? ` under #${parentId}` : "";
       await audit(caller, "work_item_created", created.id, `created ${type} ADO #${created.id}${where}`, { parentId, type, title, rule: decision.rule });
-      const data: Record<string, unknown> = { workItemId: created.id, parentId, type, url: ado.webUrl(created.id), repository, ...(builderRole ? { builderRole } : {}), ...(forAgent ? { forAgent: forAgent.name } : {}) };
+      const data: Record<string, unknown> = { workItemId: created.id, parentId, type, url: ado.webUrl(created.id), repository, ...(builderRole ? { builderRole } : {}), ...(forAgent ? { forAgent: forAgent.name } : {}), ...(dependsOn.length ? { dependsOn } : {}) };
       let content = `Created ${type} #${created.id} "${title}"${where}: ${ado.webUrl(created.id)}`;
       if (carried.length) {
         data.instructionsCopiedFrom = carried.map((c) => c.sourceId);
@@ -640,6 +645,7 @@ export function registerAgentTools(
       const title = requiredText(params.title, "title").trim();
       const description = optionalText(params.description, "description");
       const workItemIds = await prWorkItemIds(caller, params.workItemIds);
+      const labels = stringList(params.labels, "labels").map(cleanTag).filter(Boolean);
       const repo = await withNotFound(ado.getRepository(repoName), `Repository "${repoName}" was not found in the ADO project.`);
       const existing = await ado.findActivePullRequest(repo.id, sourceBranch, targetBranch);
       if (existing) {
@@ -652,7 +658,7 @@ export function registerAgentTools(
       }
       const signed = `${description ? `${description.trim()}\n\n` : ""}_Opened by [${caller.agentName}]._`;
       const pr = await withNotFound(
-        ado.createPullRequest(repo.id, { sourceBranch, targetBranch, title, description: signed, workItemIds }),
+        ado.createPullRequest(repo.id, { sourceBranch, targetBranch, title, description: signed, workItemIds, ...(labels.length ? { labels } : {}) }),
         `ADO could not open the pull request: branch ${sourceBranch} or ${targetBranch} was not found in ${repo.name}. Push the branch first.`,
       );
       await audit(caller, "pull_request_created", workItemIds[0] ?? null, `opened PR ${pr.pullRequestId} in ${repo.name} (${sourceBranch} into ${targetBranch})`, {
@@ -743,6 +749,116 @@ export function registerAgentTools(
           `Started thread ${created.threadId} (${status ?? "active"}) on pull request ${pr.pullRequestId}` +
           `${filePath ? ` on ${filePath}${line ? ` line ${line}` : ""}` : ""}: ${ado.pullRequestWebUrl(repoLabel, pr.pullRequestId)}`,
         data: { pullRequestId: pr.pullRequestId, repositoryId: pr.repositoryId, threadId: created.threadId, commentId: created.commentId, status: status ?? "active" },
+      };
+    },
+
+    async [TOOL_NAMES.updateWorkItem](caller, params, ado) {
+      const title = optionalText(params.title, "title")?.trim() || null;
+      const description = optionalText(params.description, "description")?.trim() || null;
+      const acceptanceCriteria = optionalText(params.acceptanceCriteria, "acceptanceCriteria")?.trim() || null;
+      const reproSteps = optionalText(params.reproSteps, "reproSteps")?.trim() || null;
+      const addTags = stringList(params.addTags, "addTags").map(cleanTag).filter(Boolean);
+      const removeTags = stringList(params.removeTags, "removeTags").map(cleanTag).filter(Boolean);
+      const builderRole = optionalText(params.builderRole, "builderRole")?.trim() || null;
+      const forName = optionalText(params.forAgent, "forAgent")?.trim() || null;
+      const addDeps = idList(params.dependsOn, "dependsOn");
+      const removeDeps = idList(params.removeDependsOn, "removeDependsOn");
+      const note = optionalText(params.comment, "comment")?.trim() || null;
+      const reserved = [...addTags, ...removeTags].filter(isReservedTag);
+      if (reserved.length) {
+        throw new ToolFailure(
+          `Nothing was changed: ${reserved.join(", ")} ${reserved.length === 1 ? "is a tag" : "are tags"} the plugin manages. ` +
+            "Use builderRole or forAgent here, or `repository` on ado_update_technical_notes; agent: tags are written for you.",
+        );
+      }
+      if (![title, description, acceptanceCriteria, reproSteps, builderRole, forName].some(Boolean) && !addTags.length && !removeTags.length && !addDeps.length && !removeDeps.length) {
+        throw new ToolFailure("Nothing was changed: give at least one thing to change.");
+      }
+      const id = await resolveWorkItemId(caller.run, params.workItemId);
+      const item = await withNotFound(ado.getWorkItem(id), `Work item #${id} was not found in ADO.`);
+      const type = String(item.fields["System.WorkItemType"] ?? "");
+      const state = String(item.fields["System.State"] ?? "");
+      if (!rolesThatMayCreate(type).includes(caller.role)) {
+        throw new ToolFailure(`Nothing was changed: a ${caller.role} may not change a ${type}; the roles that create it may (ado_get_workflow).`);
+      }
+      if (FINAL_STATES.some((f) => f.toLowerCase() === state.toLowerCase())) throw new ToolFailure(`Nothing was changed: #${id} is ${state}.`);
+      const lowerType = type.trim().toLowerCase();
+      const task = builderRole || forName ? await links.findTaskForWorkItem(caller.run.companyId, id) : null;
+      if (builderRole) {
+        if (lowerType !== "user story" && lowerType !== "bug") throw new ToolFailure(`Nothing was changed: builderRole is only for a User Story or Bug; a ${type} has none.`);
+        if (task?.assigneeAgentId) throw new ToolFailure(`Nothing was changed: #${id} is already assigned; its builder role no longer decides who gets it.`);
+      }
+      const forAgent = forName ? await findAgent(caller.run.companyId, forName).catch(() => null) : null;
+      if (forName) {
+        if (!["review", "qa test", "task"].includes(lowerType)) throw new ToolFailure("Nothing was changed: forAgent is only for a Review, QA Test or Task.");
+        if (!forAgent) throw new ToolFailure(`Nothing was changed: there is no agent called "${forName}".`);
+        if (task?.assigneeAgentId) throw new ToolFailure(`Nothing was changed: #${id} is already assigned; reassign it with ado_update_assignment instead.`);
+      }
+      const typeFields = acceptanceCriteria || reproSteps
+        ? await ado.getWorkItemTypeFields(type).then((list) => new Set(list.map((f) => f.referenceName.toLowerCase()))).catch(() => null)
+        : null;
+      const hasField = (ref: string, fallback: boolean) => (typeFields ? typeFields.has(ref.toLowerCase()) : fallback);
+      if (acceptanceCriteria && !hasField(ACCEPTANCE_CRITERIA_FIELD, typeHasAcceptanceCriteria(type))) {
+        throw new ToolFailure(`Nothing was changed: a ${type} has no acceptance criteria field; put the criteria in the description.`);
+      }
+      if (reproSteps && !hasField(REPRO_STEPS_FIELD, typeHasReproSteps(type))) {
+        throw new ToolFailure(`Nothing was changed: a ${type} has no repro steps field; put them in the description.`);
+      }
+      // Dependencies: added ones must exist and not be the item itself; existing links are not added twice.
+      const existing = predecessorIndexes(item);
+      const toAdd = addDeps.filter((d) => !existing.has(d));
+      for (const d of toAdd) {
+        if (d === id) throw new ToolFailure(`Nothing was changed: #${id} cannot depend on itself.`);
+        await withNotFound(ado.getWorkItem(d), `Nothing was changed: work item #${d} in dependsOn was not found.`);
+      }
+      const toRemove = removeDeps.filter((d) => existing.has(d));
+
+      const changed: string[] = [];
+      const ops: JsonPatchOp[] = [{ op: "test", path: "/rev", value: item.rev }];
+      if (title && title !== String(item.fields["System.Title"] ?? "")) {
+        ops.push({ op: "add", path: "/fields/System.Title", value: title });
+        changed.push("title");
+      }
+      let instructionsKept = false;
+      if (description) {
+        const full = keepInstructions(description, item.fields["System.Description"]);
+        instructionsKept = full !== description;
+        ops.push({ op: "add", path: "/fields/System.Description", value: textToHtml(full) });
+        changed.push("description");
+      }
+      if (acceptanceCriteria) {
+        ops.push({ op: "add", path: `/fields/${ACCEPTANCE_CRITERIA_FIELD}`, value: textToHtml(acceptanceCriteria) });
+        changed.push("acceptance criteria");
+      }
+      if (reproSteps) {
+        ops.push({ op: "add", path: `/fields/${REPRO_STEPS_FIELD}`, value: textToHtml(reproSteps) });
+        changed.push("repro steps");
+      }
+      const tags = withAgentTag(routingTags(editTags(item.fields["System.Tags"], addTags, removeTags), builderRole, forAgent?.name ?? null), caller.agentName);
+      const tagNotes = [
+        ...addTags.map((t) => `+${t}`),
+        ...removeTags.map((t) => `-${t}`),
+        ...(builderRole ? [`builder:${builderRole}`] : []),
+        ...(forAgent ? [`for:${forAgent.name}`] : []),
+      ];
+      if (tagNotes.length) changed.push(`tags (${tagNotes.join(", ")})`);
+      ops.push({ op: "add", path: "/fields/System.Tags", value: tags });
+      // Remove links from the highest index down, so the indexes stay right.
+      for (const idx of toRemove.map((d) => existing.get(d)!).sort((a, b) => b - a)) ops.push({ op: "remove", path: `/relations/${idx}` });
+      for (const d of toAdd) ops.push({ op: "add", path: "/relations/-", value: { rel: DEPENDS_ON_REL, url: ado.workItemApiUrl(d) } });
+      if (toAdd.length) changed.push(`depends on ${toAdd.map((d) => `#${d}`).join(", ")}`);
+      if (toRemove.length) changed.push(`no longer depends on ${toRemove.map((d) => `#${d}`).join(", ")}`);
+      if (!changed.length) {
+        return { content: `Nothing changed on #${id}: it already has what you gave.`, data: { workItemId: id, changed: false } };
+      }
+      const history = `Changed ${changed.join("; ")}.${note ? ` ${note}` : ""}`;
+      ops.push({ op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, history) });
+      const updated = await ado.updateWorkItem(id, ops);
+      await audit(caller, "work_item_updated", id, `updated ADO #${id}: ${changed.join("; ")}`, { rev: updated.rev, changed });
+      const kept = instructionsKept ? " Josh's instructions were kept at the end of the description." : "";
+      return {
+        content: `Updated ${type} #${id}: ${changed.join("; ")}.${kept}`,
+        data: { workItemId: id, rev: updated.rev, changed, ...(toAdd.length ? { addedDependencies: toAdd } : {}), ...(toRemove.length ? { removedDependencies: toRemove } : {}) },
       };
     },
 
@@ -1159,6 +1275,20 @@ function threadStatusParam(value: unknown): PrThreadStatus | null {
 export function signPrText(agentName: string, text: string): string {
   const tag = `[${agentName}]`;
   return text.trimStart().toLowerCase().startsWith(tag.toLowerCase()) ? text : `${tag} ${text}`;
+}
+
+/** An optional array of work item ids (deduplicated). */
+function idList(value: unknown, name: string): number[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new ToolFailure(`${name} must be a list of work item IDs, for example [812].`);
+  return [...new Set(value.map((v) => positiveInt(v, name)))];
+}
+
+/** An optional array of strings. */
+function stringList(value: unknown, name: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) throw new ToolFailure(`${name} must be a list of text values.`);
+  return value as string[];
 }
 
 function positiveInt(value: unknown, name: string): number {

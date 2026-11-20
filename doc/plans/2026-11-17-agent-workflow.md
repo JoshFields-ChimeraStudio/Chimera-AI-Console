@@ -35,9 +35,15 @@ Tool rights per role (`src/tools/roles.ts`; the A8 section of `doc/plans/2026-11
 | `ado_post_comment`, `ado_update_state`, `ado_update_assignment`, `ado_post_pr_comment` | | yes | yes | yes | yes |
 | `ado_create_pr_link`, `ado_create_pull_request` | | | yes | yes | yes |
 | `ado_update_technical_notes` | | | | yes | yes |
-| `ado_create_work_item` | | qa only | builder only | | yes |
+| `ado_create_work_item`, `ado_update_work_item` | | qa only | builder only | | yes |
 
-The create tool goes to the roles the creation table below names, so an architect has none.
+The create tool goes to the roles the creation table below names, so an architect has none. `ado_update_work_item` (A11, 20 November 2026) goes with it: a role may change the types it may create.
+
+## Changing work items (`ado_update_work_item`)
+
+Added 20 November 2026 (A11). A role may change a work item of a type it may create (the table under "Creating work items"), until the item is Completed or Removed: title, description, acceptance criteria, repro steps, tags (`addTags`, `removeTags`), `builderRole` on a Story or Bug that nobody holds yet, `forAgent` on a Review, QA Test or Task that is not assigned yet, and dependencies (`dependsOn`, `removeDependsOn`). Text replaces the field; an `Instructions from Josh` section is kept at the end of a new description that leaves it out. Tags starting `agent:`, `repo:`, `builder:` or `for:` are the plugin's and are refused in `addTags` and `removeTags`. One rev-guarded update, with `[Name] Changed …` in the history and the agent tag.
+
+**Dependencies are links.** `dependsOn` (on `ado_create_work_item` too) adds a Predecessor link to each item named (ADO `System.LinkTypes.Dependency-Reverse`), which ADO shows on both items. Routing (A6) reads these links and, for older items, `Depends on #<id>` in the description (`src/workflow/dependencies.ts`). Pull requests take tags too: `labels` on `ado_create_pull_request`.
 
 ## Assigning work items (`ado_update_assignment`)
 

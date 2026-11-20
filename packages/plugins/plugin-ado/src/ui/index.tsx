@@ -4,6 +4,8 @@ import type { AdoStatus } from "../worker.js";
 import type { IssueLinkData } from "../links/index.js";
 import type { NeedsJoshData, NeedsJoshItem } from "../backlog/index.js";
 import type { CleanUpResult, SmokeData, StartResult } from "../smoke/index.js";
+import type { PullRequestView, TaskPullRequestsData } from "../pullrequests/view.js";
+import type { BuilderQueuesData } from "../routing/index.js";
 
 // Keys match LINK_DATA_KEYS / LINK_ACTION_KEYS in ../links/index.ts (not imported, to keep worker code out of the UI bundle).
 const LINK_DATA_KEY = "issue-link";
@@ -407,6 +409,232 @@ export function AdoSmokeTest({ context }: PluginWidgetProps) {
           ))}
         </ol>
       </details>
+    </div>
+  );
+}
+
+// Key matches PR_VIEW_DATA_KEY in ../pullrequests/view.ts (not imported, to keep worker code out of the UI bundle).
+const PR_VIEW_DATA_KEY = "task-pull-requests";
+
+const CHECK_LABELS: Record<string, string> = {
+  approved: "passed",
+  rejected: "failed",
+  running: "running",
+  queued: "queued",
+  notApplicable: "not applicable",
+  broken: "broken",
+};
+
+function prStatusLabel(pr: PullRequestView): string {
+  if (pr.status === "completed") return "Merged";
+  if (pr.status === "abandoned") return "Abandoned";
+  if (pr.isDraft) return "Draft";
+  if (pr.mergeStatus === "conflicts") return "Open · merge conflicts";
+  return "Open";
+}
+
+/**
+ * A5: the task's "Pull request" tab. The pull requests of its work item (a Review's or QA Test's
+ * are its Story's), read live: status, reviewers' votes, branch policy checks and open threads.
+ */
+export function AdoPullRequestTab({ context }: PluginWidgetProps) {
+  const companyId = context.companyId;
+  const issueId = context.entityId;
+  const { data, loading, error, refresh } = usePluginData<TaskPullRequestsData>(PR_VIEW_DATA_KEY, { companyId, issueId });
+  const box = { display: "grid", gap: "0.75rem", padding: "0.5rem 0" } as const;
+  const muted = { opacity: 0.7, fontSize: "0.85rem" } as const;
+
+  if (loading && !data) return <div style={box}>Loading pull requests from ADO…</div>;
+  if (error) return <div style={box} role="alert">Could not load pull requests: {error.message}</div>;
+  if (!data?.configured) return <div style={box}>The Azure DevOps plugin is not set up for this company.</div>;
+  if (!data.workItemId) return <div style={box}>This task is not linked to an ADO work item.</div>;
+
+  return (
+    <div style={box}>
+      <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
+        <span style={muted}>
+          {data.parentWorkItemId ? `Pull requests of the parent work item #${data.parentWorkItemId}` : `Pull requests of work item #${data.workItemId}`}
+        </span>
+        <button type="button" onClick={() => refresh()} disabled={loading}>
+          {loading ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
+      {data.error ? <div role="alert">ADO: {data.error}</div> : null}
+      {!data.error && !data.pullRequests.length ? <div>No pull request is linked yet.</div> : null}
+      {data.pullRequests.map((pr) => (
+        <section key={pr.pullRequestId} style={{ border: "1px solid rgba(127,127,127,0.3)", borderRadius: 6, padding: "0.75rem", display: "grid", gap: "0.5rem" }}>
+          <div>
+            <a href={pr.url} target="_blank" rel="noreferrer">
+              <strong>
+                #{pr.pullRequestId} {pr.title}
+              </strong>
+            </a>
+            <div style={muted}>
+              {prStatusLabel(pr)}
+              {pr.repositoryName ? ` · ${pr.repositoryName}` : ""}
+              {pr.sourceBranch && pr.targetBranch ? ` · ${pr.sourceBranch} → ${pr.targetBranch}` : ""}
+              {pr.createdBy ? ` · by ${pr.createdBy}` : ""}
+            </div>
+          </div>
+          <div>
+            <strong>Reviewers</strong>
+            {pr.reviewers.length ? (
+              <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem" }}>
+                {pr.reviewers.map((r) => (
+                  <li key={r.name}>
+                    {r.name}: {r.voteLabel}
+                    {r.isRequired ? " (required)" : ""}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div style={muted}>None</div>
+            )}
+          </div>
+          <div>
+            <strong>Checks</strong>
+            {pr.checks === null ? (
+              <div style={muted}>Not available{pr.checksError ? `: ${pr.checksError}` : ""}</div>
+            ) : pr.checks.length ? (
+              <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem" }}>
+                {pr.checks.map((c, i) => (
+                  <li key={`${c.name}-${i}`}>
+                    {c.name}: {CHECK_LABELS[c.status] ?? c.status}
+                    {c.isBlocking ? "" : " (optional)"}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div style={muted}>No branch policies</div>
+            )}
+          </div>
+          <div>
+            <strong>Open threads ({pr.openThreads.length})</strong>
+            {pr.resolvedThreads ? <span style={muted}> · {pr.resolvedThreads} resolved</span> : null}
+            {pr.openThreads.length ? (
+              <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem", display: "grid", gap: "0.4rem" }}>
+                {pr.openThreads.map((t) => (
+                  <li key={t.id}>
+                    <div style={muted}>
+                      {t.author || "Someone"}
+                      {t.filePath ? ` on ${t.filePath}${t.line ? ` line ${t.line}` : ""}` : ""}
+                      {t.replies ? ` · ${t.replies} repl${t.replies === 1 ? "y" : "ies"}` : ""}
+                    </div>
+                    <div style={{ whiteSpace: "pre-wrap" }}>{t.excerpt}</div>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+// Keys match QUEUE_DATA_KEY / QUEUE_ACTION_KEYS in ../routing/index.ts (not imported, to keep worker code out of the UI bundle).
+const QUEUE_DATA_KEY = "builder-queues";
+const QUEUE_ROUTE_NOW = "builder-queues-route-now";
+
+/**
+ * A6: per builder role, what each builder holds against its limit, and the tagged Stories that
+ * wait, with why. Read when the dashboard opens or on Refresh; assigns nothing unless you press
+ * Route now (which runs the same routing a finished Story or a merge runs).
+ */
+export function AdoBuilderQueues({ context }: PluginWidgetProps) {
+  const companyId = context.companyId;
+  const { data, loading, error, refresh } = usePluginData<BuilderQueuesData>(QUEUE_DATA_KEY, { companyId });
+  const routeNow = usePluginAction(QUEUE_ROUTE_NOW);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const muted = { opacity: 0.7, fontSize: "0.85rem" } as const;
+  const list = { margin: "0.25rem 0 0", paddingLeft: "1.25rem" } as const;
+
+  if (loading && !data) return <div>Loading builder queues…</div>;
+  if (error) return <div role="alert">Builder queues unavailable: {error.message}</div>;
+  if (!data?.configured) return <div style={muted}>The Azure DevOps plugin is not set up.</div>;
+  if (data.error) return <div role="alert">ADO: {data.error}</div>;
+  if (!data.routes.length) return <div style={muted}>No builder routes are set (Azure DevOps settings, Builder routes).</div>;
+
+  async function run() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = (await routeNow({ companyId })) as { assigned?: Array<{ workItemId: number; agent: string }> };
+      const n = res.assigned?.length ?? 0;
+      setMessage(n ? `Started ${res.assigned!.map((a) => `#${a.workItemId} (${a.agent})`).join(", ")}.` : "Nothing could start.");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  }
+
+  return (
+    <div style={{ display: "grid", gap: "0.75rem" }}>
+      {data.routes.map((route) => (
+        <div key={route.role}>
+          <strong>{route.role}</strong>
+          <ul style={list}>
+            {route.builders.map((b) => (
+              <li key={b.name}>
+                {b.name}: {b.held.length} of {b.limit}
+                {b.status === "missing" ? " (no such agent)" : b.status === "paused" ? " (paused)" : ""}
+                {b.held.length ? (
+                  <ul style={list}>
+                    {b.held.map((h) => (
+                      <li key={h.workItemId} style={muted}>
+                        #{h.workItemId} {h.title} · {h.state}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+      <div>
+        <strong>Waiting ({data.waiting.length})</strong>
+        {data.waiting.length ? (
+          <ul style={list}>
+            {data.waiting.map((w) => (
+              <li key={w.workItemId}>
+                <a href={w.url} target="_blank" rel="noreferrer">
+                  #{w.workItemId} {w.title}
+                </a>{" "}
+                <span style={muted}>
+                  ({w.role}): {w.why}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <div style={muted}>Nothing is waiting.</div>
+        )}
+      </div>
+      {data.ready.length ? (
+        <div>
+          <strong>Ready to start ({data.ready.length})</strong>
+          <ul style={list}>
+            {data.ready.map((r) => (
+              <li key={r.workItemId}>
+                #{r.workItemId} {r.title} <span style={muted}>→ {r.agent}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+        <button type="button" onClick={() => refresh()} disabled={loading || busy}>
+          Refresh
+        </button>
+        <button type="button" onClick={() => void run()} disabled={busy || !data.ready.length} title="Start what is ready now">
+          {busy ? "Routing…" : "Route now"}
+        </button>
+        {message ? <span role="status" style={muted}>{message}</span> : null}
+      </div>
     </div>
   );
 }

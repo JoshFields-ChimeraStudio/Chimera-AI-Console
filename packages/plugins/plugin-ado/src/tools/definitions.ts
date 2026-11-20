@@ -20,6 +20,7 @@ export const TOOL_NAMES = {
   getPullRequestChanges: "ado_get_pr_changes",
   searchWorkItems: "ado_search_work_items",
   getWorkflow: "ado_get_workflow",
+  updateWorkItem: "ado_update_work_item",
 } as const;
 
 /**
@@ -43,6 +44,16 @@ const workItemId = {
   minimum: 1,
   description:
     "Azure DevOps work item ID, for example 1234. Optional: if omitted, the work item linked to the task you are working on is used.",
+};
+
+/** A11: dependencies as ADO Predecessor links. */
+const dependsOn = {
+  type: "array",
+  items: { type: "integer", minimum: 1 },
+  maxItems: 20,
+  description:
+    "Work items this one must wait for, for example [812, 813]: each becomes a Predecessor link in ADO. " +
+    "A builder's Story waits until each is Completed, or, for a Story or Bug, until its pull request is merged.",
 };
 
 export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
@@ -169,8 +180,9 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
           maxLength: 100,
           description:
             "For a User Story or Bug: the kind of builder it needs, as the plugin's builder routes name them (for example backend, web, infra). Tags it builder:<role>; " +
-            "after Josh's approval the plugin assigns it to a builder of that role with room. Put any \"Depends on #<id>\" in the description.",
+            "after Josh's approval the plugin assigns it to a builder of that role with room. Name what it must wait for in `dependsOn`.",
         },
+        dependsOn,
         forAgent: {
           type: "string",
           minLength: 1,
@@ -225,6 +237,12 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
           minItems: 1,
           maxItems: 10,
           description: "Work items to link, for example [827] or [835, 827] for a Defect and its Story. Default: your current task's work item.",
+        },
+        labels: {
+          type: "array",
+          items: { type: "string", minLength: 1, maxLength: 100 },
+          maxItems: 10,
+          description: "Optional tags for the pull request (ADO calls them labels), for example [\"docs\"].",
         },
       },
       required: ["repository", "sourceBranch", "title"],
@@ -358,5 +376,32 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
       "Read the ADO workflow rules the tools enforce: the roles, who may assign work items, who may create which type under which parent, " +
       "who may set which state on which type, and the allowed Document moves. Also says which role you have. Use this instead of a copy of the rules.",
     parametersSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: TOOL_NAMES.updateWorkItem,
+    displayName: "ADO: update work item",
+    description:
+      "Change a work item after it was created: title, description, acceptance criteria, repro steps, tags, builder role or agent tag, and what it depends on. " +
+      "Only the roles that may create its type may change it (ado_get_workflow), and not once it is Completed or Removed. " +
+      "Give only what changes; text replaces the field. An \"Instructions from Josh\" section in the description is kept if your new text leaves it out. " +
+      "Tags starting agent:, repo:, builder: or for: are the plugin's: use builderRole, forAgent, or `repository` on ado_update_technical_notes. Your name goes in the history.",
+    parametersSchema: {
+      type: "object",
+      properties: {
+        workItemId,
+        title: { type: "string", minLength: 1, maxLength: 255, description: "New title." },
+        description: { type: "string", minLength: 1, maxLength: 20000, description: "New description, as plain text (replaces the old one)." },
+        acceptanceCriteria: { type: "string", minLength: 1, maxLength: 20000, description: "New acceptance criteria, plain text, one per line, for types that have the field." },
+        reproSteps: { type: "string", minLength: 1, maxLength: 20000, description: "New steps to reproduce, for a Bug or Defect." },
+        addTags: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 20, description: "Tags to add, for example [\"needs-design\"]." },
+        removeTags: { type: "array", items: { type: "string", minLength: 1, maxLength: 100 }, maxItems: 20, description: "Tags to remove." },
+        builderRole: { type: "string", minLength: 1, maxLength: 100, description: "For a User Story or Bug that has not started: the kind of builder it needs (replaces its builder: tag)." },
+        forAgent: { type: "string", minLength: 1, maxLength: 100, description: "For a Review, QA Test or Task that is not assigned yet: the agent it is for (replaces its for: tag)." },
+        dependsOn: { ...dependsOn, description: "Work items to add as things this one waits for (Predecessor links). Existing links are kept." },
+        removeDependsOn: { type: "array", items: { type: "integer", minimum: 1 }, maxItems: 20, description: "Work items this one no longer waits for (their Predecessor links are removed)." },
+        comment: { type: "string", maxLength: 2000, description: "Optional: why, added to the item's history with your name." },
+      },
+      additionalProperties: false,
+    },
   },
 ];

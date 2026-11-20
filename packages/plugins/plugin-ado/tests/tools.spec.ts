@@ -153,6 +153,7 @@ class FakeAdo {
             return Response.json({ message: "TF26071: This work item has been changed by someone else" }, { status: 412 });
           }
           if (op.path === "/relations/-") item.relations.push(op.value);
+          else if (op.op === "remove" && op.path.startsWith("/relations/")) item.relations.splice(Number(op.path.slice(11)), 1);
           else if (op.path === "/fields/System.State") {
             const list = this.updates.get(item.id) ?? [];
             list.push({ rev: item.rev + 1, fields: { "System.State": { oldValue: item.fields["System.State"], newValue: op.value } } });
@@ -224,7 +225,7 @@ class FakeAdo {
       if (method === "POST") {
         if (body.sourceRefName === "refs/heads/missing") return Response.json({ message: "TF401398: branch not found" }, { status: 404 });
         const pr = { id: this.nextPrId++, title: body.title, status: "active", source: body.sourceRefName.slice(11), target: body.targetRefName.slice(11),
-          description: body.description, workItemRefs: body.workItemRefs, threads: [] };
+          description: body.description, workItemRefs: body.workItemRefs, labels: body.labels, threads: [] };
         this.prs.set(pr.id, pr);
         return Response.json({ pullRequestId: pr.id });
       }
@@ -376,7 +377,13 @@ describe("roles", () => {
     for (const role of ["architect", "reviewer", "readonly"] as const) expect(ROLE_POLICIES[role].tools).not.toContain(TOOL_NAMES.createWorkItem);
     for (const role of ["director", "planner", "architect", "builder", "reviewer"] as const) expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.assign);
     expect(ROLE_POLICIES.reviewer.tools).not.toContain(TOOL_NAMES.linkPullRequest);
-    expect(ROLE_POLICIES.architect.tools).toEqual([...ROLE_POLICIES.builder.tools.filter((t) => t !== TOOL_NAMES.createWorkItem), TOOL_NAMES.setTechnicalNotes]);
+    // A11: the roles that create a type may also change it.
+    for (const role of ["director", "planner", "builder"] as const) expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.updateWorkItem);
+    for (const role of ["architect", "reviewer", "readonly"] as const) expect(ROLE_POLICIES[role].tools).not.toContain(TOOL_NAMES.updateWorkItem);
+    expect(ROLE_POLICIES.architect.tools).toEqual([
+      ...ROLE_POLICIES.builder.tools.filter((t) => t !== TOOL_NAMES.createWorkItem && t !== TOOL_NAMES.updateWorkItem),
+      TOOL_NAMES.setTechnicalNotes,
+    ]);
     // Authors write Documents as pull requests: no work items, no technical notes.
     expect(ROLE_POLICIES.author.tools).toContain(TOOL_NAMES.createPullRequest);
     for (const t of [TOOL_NAMES.createWorkItem, TOOL_NAMES.setTechnicalNotes]) expect(ROLE_POLICIES.author.tools).not.toContain(t);
@@ -425,6 +432,71 @@ describe("host risk rating of tool names", () => {
 });
 
 describe("pull request tools", () => {
+  it("ado_update_work_item changes fields, tags and dependencies, signed, and keeps Josh's instructions (A11)", async () => {
+    const s = setup();
+    s.ado.add(31, "Feature", "Refining");
+    s.ado.add(50, "User Story", "New", 31);
+    s.ado.add(51, "User Story", "New", 31);
+    s.ado.items.get(50)!.fields["System.Description"] = "<div>Old text.</div><div>Instructions from Josh: keep it short.</div>";
+    s.ado.items.get(50)!.fields["System.Tags"] = "agent:Tiamat; old";
+    const res = await s.call(
+      TOOL_NAMES.updateWorkItem,
+      { workItemId: 50, title: "New title", description: "New text.", addTags: ["needs-design"], removeTags: ["old"], builderRole: "web", dependsOn: [51, 42], comment: "Split from #42." },
+      "tiamat",
+    );
+    expect(res.error).toBeUndefined();
+    expect(res.content).toBe(
+      "Updated User Story #50: title; description; tags (+needs-design, -old, builder:web); depends on #51, #42. Josh's instructions were kept at the end of the description.",
+    );
+    const item = s.ado.items.get(50)!;
+    expect(item.fields["System.Title"]).toBe("New title");
+    expect(htmlToText(item.fields["System.Description"] as string)).toBe("New text.\n\nInstructions from Josh: keep it short.");
+    expect(item.fields["System.Tags"]).toBe("needs-design; builder:web; agent:Tiamat");
+    expect(htmlToText(item.fields["System.History"] as string)).toContain("[Tiamat] Changed title;");
+    expect(item.relations.filter((r) => r.rel === "System.LinkTypes.Dependency-Reverse").map((r) => r.url)).toEqual([
+      `${ORG}/_apis/wit/workItems/51`,
+      `${ORG}/_apis/wit/workItems/42`,
+    ]);
+    // Already linked: not added twice. Removing one keeps the others.
+    const again = await s.call(TOOL_NAMES.updateWorkItem, { workItemId: 50, dependsOn: [51], removeDependsOn: [42] }, "tiamat");
+    expect(again.content).toBe("Updated User Story #50: no longer depends on #42.");
+    expect(item.relations.filter((r) => r.rel === "System.LinkTypes.Dependency-Reverse").map((r) => r.url)).toEqual([`${ORG}/_apis/wit/workItems/51`]);
+    expect(s.harness.activity.at(-1)).toMatchObject({ message: "[Tiamat] updated ADO #50: no longer depends on #42" });
+  });
+
+  it("ado_update_work_item refuses plugin tags, other roles' types, final items and depending on itself", async () => {
+    const s = setup();
+    s.ado.add(31, "Feature", "Refining");
+    s.ado.add(50, "User Story", "New", 31);
+    s.ado.add(52, "User Story", "Completed", 31);
+    const err = async (params: object, agent: "tiamat" | "ladon" | "ryujin" = "tiamat") => (await s.call(TOOL_NAMES.updateWorkItem, params, agent)).error;
+    expect(await err({ workItemId: 50, addTags: ["repo:Products"] })).toMatch(/repo:Products is a tag the plugin manages/);
+    expect(await err({ workItemId: 50 })).toMatch(/give at least one thing to change/);
+    expect(await err({ workItemId: 50, title: "x" }, "ladon")).toMatch(/Permission denied/);
+    // A builder creates Tasks, so may change Tasks, not Stories.
+    expect(await err({ workItemId: 50, title: "x" }, "ryujin")).toMatch(/a builder may not change a User Story/);
+    expect(await err({ workItemId: 52, title: "x" })).toMatch(/#52 is Completed/);
+    expect(await err({ workItemId: 50, dependsOn: [50] })).toMatch(/cannot depend on itself/);
+    expect(await err({ workItemId: 50, dependsOn: [999] })).toMatch(/#999 in dependsOn was not found/);
+    expect(await err({ workItemId: 50, forAgent: "Ladon" })).toMatch(/forAgent is only for a Review, QA Test or Task/);
+    expect(s.ado.writes()).toHaveLength(0);
+  });
+
+  it("ado_create_work_item links what the new item depends on; pull requests take labels (A11)", async () => {
+    const s = setup();
+    s.ado.add(31, "Feature", "Refining");
+    const res = await s.call(TOOL_NAMES.createWorkItem, { parentId: 31, type: "User Story", title: "s", dependsOn: [42] }, "tiamat");
+    expect(res.error).toBeUndefined();
+    expect(res.data).toMatchObject({ dependsOn: [42] });
+    const created = s.ado.items.get((res.data as { workItemId: number }).workItemId)!;
+    expect(created.relations.map((r) => r.rel)).toEqual(["System.LinkTypes.Hierarchy-Reverse", "System.LinkTypes.Dependency-Reverse"]);
+    expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 31, type: "User Story", title: "s", dependsOn: [999] }, "tiamat")).error).toMatch(/#999 in dependsOn was not found/);
+
+    const pr = await s.call(TOOL_NAMES.createPullRequest, { repository: "SimpleRepo", sourceBranch: "ai/42-story", title: "t", labels: ["docs; x"] }, "ryujin", "run-with-task");
+    expect(pr.error).toBeUndefined();
+    expect(s.ado.prs.get(400)).toMatchObject({ labels: [{ name: "docs x" }] });
+  });
+
   it("opens a signed pull request linked to the task's work item, and returns the open one instead of a second", async () => {
     const s = setup();
     const params = { repository: "SimpleRepo", sourceBranch: "refs/heads/ai/42-story", title: "#42 Story", description: "Adds the line." };

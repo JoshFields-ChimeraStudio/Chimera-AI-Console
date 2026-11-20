@@ -17,6 +17,8 @@ interface Item {
   parent?: number;
   tags?: string;
   description?: string;
+  /** Linked pull requests: id and status. */
+  prs?: Array<{ id: number; status: string }>;
 }
 
 function setup(items: Item[], routes = [{ role: "backend", agents: "Ouroboros, Hydra", wipLimit: 1 }]) {
@@ -36,11 +38,18 @@ function setup(items: Item[], routes = [{ role: "backend", agents: "Ouroboros, H
       ...(i.tags ? { "System.Tags": i.tags } : {}),
       ...(i.description ? { "System.Description": i.description } : {}),
     },
-    relations: [...byId.values()].filter((c) => c.parent === i.id).map((c) => ({ rel: "System.LinkTypes.Hierarchy-Forward", url: `x/_apis/wit/workItems/${c.id}` })),
+    relations: [
+      ...[...byId.values()].filter((c) => c.parent === i.id).map((c) => ({ rel: "System.LinkTypes.Hierarchy-Forward", url: `x/_apis/wit/workItems/${c.id}` })),
+      ...(i.prs ?? []).map((p) => ({ rel: "ArtifactLink", url: `vstfs:///Git/PullRequestId/proj%2Frepo%2F${p.id}` })),
+    ],
   });
+  const prStatus = new Map<number, string>();
+  for (const i of items) for (const p of i.prs ?? []) prStatus.set(p.id, p.status);
   const ado = {
     getWorkItem: async (id: number) => json(byId.get(id)!),
     addComment: async (id: number, html: string) => void comments.push([id, html]),
+    webUrl: (id: number) => `https://ado/${id}`,
+    getPullRequest: async (_repo: string, id: number) => ({ pullRequestId: id, status: prStatus.get(id) ?? "active" }),
     queryWorkItemIds: async () => [...byId.values()].filter((i) => ["User Story", "Bug"].includes(i.type) && i.state === "New").map((i) => i.id),
   };
   const ctx = {
@@ -60,7 +69,7 @@ function setup(items: Item[], routes = [{ role: "backend", agents: "Ouroboros, H
       const entry = [...tasks.entries()].find(([, t]) => t.id === issueId);
       if (!entry) return null;
       const it = byId.get(entry[0])!;
-      return { workItemId: it.id, type: it.type, state: it.state } as never;
+      return { workItemId: it.id, type: it.type, state: it.state, title: `Item ${it.id}` } as never;
     },
   };
   const assigner = {
@@ -77,7 +86,7 @@ function setup(items: Item[], routes = [{ role: "backend", agents: "Ouroboros, H
     routes: async () => parseRoutes(routes),
   });
   const summary = (id: number) => ({ id, type: byId.get(id)!.type, state: byId.get(id)!.state }) as never;
-  return { router, byId, tasks, assigned, comments, summary };
+  return { router, byId, tasks, assigned, comments, summary, prStatus };
 }
 
 describe("builder routes (A6)", () => {
@@ -143,13 +152,61 @@ describe("builder routes (A6)", () => {
     );
     await s.router.onStateChanged(CO, s.summary(200));
     expect(s.assigned).toEqual([[201, "Ouroboros"]]);
-    expect(s.comments.find(([id]) => id === 200)![1]).toContain("#202 (depends on #201)");
+    expect(s.comments.find(([id]) => id === 200)![1]).toContain("#202 (waits for #201 to be merged)");
 
     s.byId.get(201)!.state = "Completed";
     s.tasks.get(201)!.status = "done";
     await s.router.onStateChanged(CO, s.summary(201));
     // #202 starts; #301's Feature is not approved, so it stays.
     expect(s.assigned.slice(1)).toEqual([[202, "Ouroboros"]]);
+  });
+
+  it("starts a dependent Story once its dependency's pull request is merged (A5)", async () => {
+    const s = setup(
+      [
+        { id: 200, type: "Feature", state: "Ready For Work" },
+        { id: 201, type: "User Story", state: "In Testing", parent: 200, tags: "builder:backend", prs: [{ id: 7, status: "abandoned" }, { id: 8, status: "active" }] },
+        { id: 202, type: "User Story", state: "New", parent: 200, tags: "builder:backend", description: "Depends on #201 and #203" },
+        { id: 203, type: "Task", state: "In Progress", parent: 200 },
+      ],
+      [{ role: "backend", agents: "Ouroboros", wipLimit: 2 }],
+    );
+    s.tasks.set(201, { id: "t-201", agentId: "a-ouro", status: "in_progress" });
+    await s.router.onStateChanged(CO, s.summary(200));
+    expect(s.comments.find(([id]) => id === 200)![1]).toContain("#202 (waits for #201 to be merged and #203 to finish)");
+
+    s.byId.get(203)!.state = "Completed";
+    s.prStatus.set(8, "completed");
+    await s.router.fillSlots(CO, "pull request #8 merged");
+    expect(s.assigned).toEqual([[202, "Ouroboros"]]);
+  });
+
+  it("shows the queues without assigning anything (A6 queue view)", async () => {
+    const s = setup(
+      [
+        { id: 600, type: "Feature", state: "Ready For Work" },
+        { id: 601, type: "User Story", state: "In Progress", parent: 600, tags: "builder:backend" },
+        { id: 602, type: "User Story", state: "New", parent: 600, tags: "builder:backend" },
+        { id: 603, type: "User Story", state: "New", parent: 600, tags: "builder:backend", description: "Depends on #601" },
+        { id: 700, type: "Feature", state: "Ready For Approval" },
+        { id: 701, type: "User Story", state: "New", parent: 700, tags: "builder:backend" },
+      ],
+      [{ role: "backend", agents: "Ouroboros, Hydra, Nobody", wipLimit: 1 }],
+    );
+    s.tasks.set(601, { id: "t-601", agentId: "a-ouro", status: "in_progress" });
+    const q = await s.router.queues(CO);
+    expect(s.assigned).toEqual([]);
+    expect(q.routes[0]!.builders.map((b) => [b.name, b.status, b.held.map((h) => h.workItemId)])).toEqual([
+      ["Ouroboros", "idle", [601]],
+      ["Hydra", "idle", []],
+      ["Nobody", "missing", []],
+    ]);
+    expect(q.ready.map((r) => [r.workItemId, r.agent])).toEqual([[602, "Hydra"]]);
+    expect(q.waiting.map((w) => [w.workItemId, w.why])).toEqual([
+      [603, "waits for #601 to be merged"],
+      [701, "its Feature #700 is not approved yet"],
+    ]);
+    expect(q.waiting[0]!.url).toBe("https://ado/603");
   });
 
   it("does nothing without routes, and skips paused agents", async () => {
