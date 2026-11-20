@@ -835,7 +835,7 @@ describe("ado_update_state", () => {
     expect((await set(72, "Testing", "hydra")).error).toBeUndefined();
     expect((await set(72, "Failed", "hydra")).error).toBeUndefined();
     // QA files a Defect under the Story and gives it to the Story's owner.
-    const defect = await s.call(TOOL_NAMES.createWorkItem, { type: "Defect", title: "Greeting is wrong", parentId: 70, assignTo: "Zhulong" }, "hydra");
+    const defect = await s.call(TOOL_NAMES.createWorkItem, { type: "Defect", title: "Greeting is wrong", description: "cat README.md shows Hi; expected Hello", parentId: 70, assignTo: "Zhulong" }, "hydra");
     expect(defect.error).toBeUndefined();
     expect(defect.data).toMatchObject({ type: "Defect", assignment: { agentId: AGENTS.zhulong.id } });
     const defectId = (defect.data as { workItemId: number }).workItemId;

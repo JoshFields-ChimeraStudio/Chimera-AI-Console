@@ -87,6 +87,12 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Service account display name",
         description: "Events caused by this account are ignored so the plugin never reacts to its own writes",
       },
+      smokeTestAgent: {
+        type: "string",
+        title: "Smoke-test agent",
+        description:
+          "The agent the smoke-test Epic is assigned to (the test team's planner, for example Rowan). Leave empty to turn the smoke-test widget's buttons off, for example on the real team's project.",
+      },
       agentRoles: {
         type: "array",
         title: "Agent roles for ADO tools",
@@ -122,6 +128,12 @@ const manifest: PaperclipPluginManifestV1 = {
         id: "ado-status",
         displayName: "Azure DevOps",
         exportName: "AdoStatusWidget",
+      },
+      {
+        type: "dashboardWidget",
+        id: "ado-smoke-test",
+        displayName: "Azure DevOps smoke test",
+        exportName: "AdoSmokeTest",
       },
       {
         type: "globalToolbarButton",

@@ -6,6 +6,7 @@ import { AdoClient } from "../src/ado/client.js";
 import type { PluginDeps } from "../src/deps.js";
 import type { AdoLink, LinkFeatures } from "../src/links/index.js";
 import { countReviewRounds, registerAgentTools } from "../src/tools/index.js";
+import { extractInstructions, instructionsToCarry, withInstructions } from "../src/workflow/instructions.js";
 import { TOOL_DECLARATIONS, TOOL_NAMES } from "../src/tools/definitions.js";
 import { attributedHtml, htmlToText, textToHtml } from "../src/tools/html.js";
 import { ROLE_POLICIES, pruneBindings, resolveRole, type RoleBindings } from "../src/tools/roles.js";
@@ -63,6 +64,8 @@ interface FakeItem {
 
 /** A small in-memory ADO that speaks the REST calls the tools make. */
 class FakeAdo {
+  /** Fields of a type as ADO lists them; a type not here answers 404, so the tool falls back to its defaults. */
+  typeFields: Record<string, Array<{ referenceName: string; name: string; alwaysRequired?: boolean; defaultValue?: unknown }>> = {};
   items = new Map<number, FakeItem>();
   comments = new Map<number, Array<{ id: number; text: string; createdBy: { displayName: string }; createdDate: string }>>();
   requests: Array<{ method: string; url: string; body?: unknown; contentType?: string }> = [];
@@ -166,6 +169,11 @@ class FakeAdo {
       }
       this.items.set(id, item);
       return Response.json(item);
+    }
+    if ((m = path.match(/^\/_apis\/wit\/workitemtypes\/(.+)\/fields$/))) {
+      const fields = this.typeFields[decodeURIComponent(m[1]!)];
+      if (!fields) return Response.json({ message: "not in this fake" }, { status: 404 });
+      return Response.json({ value: fields });
     }
     if ((m = path.match(/^\/_apis\/wit\/workitemtypes\/(.+)\/states$/))) {
       const states = TYPE_STATES[decodeURIComponent(m[1]!)] ?? ["New", "Active", "Resolved", "Closed", "Removed"];
@@ -752,6 +760,89 @@ describe("agent tools", () => {
       { op: "add", path: "/relations/-", value: { rel: "System.LinkTypes.Hierarchy-Reverse", url: `${ORG}/_apis/wit/workItems/42` } },
     ]);
     expect(s.harness.activity[0]).toMatchObject({ message: "[Ryujin] created Task ADO #500 under #42", metadata: { workItemId: 500, parentId: 42 } });
+  });
+
+  it("ado_create_work_item copies Josh's instructions from the items above, once", async () => {
+    const s = setup();
+    s.ado.add(30, "Epic", "In Progress");
+    s.ado.items.get(30)!.fields["System.Description"] =
+      "Build a file.<br><br>Instructions from Josh:<br>- Review: ask for one change.<br>- QA Test: fail once with a Defect.";
+    s.ado.add(31, "Feature", "Refining", 30);
+    s.ado.add(32, "User Story", "New", 31);
+    const descriptionOf = (i: number) => (s.ado.writes()[i]!.body as Array<{ path: string; value: unknown }>).find((o) => o.path === "/fields/System.Description")?.value;
+
+    // The Feature had no copy (as in smoke test #848): the Review still gets the Epic's instructions.
+    const review = await s.call(TOOL_NAMES.createWorkItem, { parentId: 32, type: "Review", title: "Code review", description: "Review the pull request." }, "tiamat");
+    expect(review.error).toBeUndefined();
+    expect(review.data).toMatchObject({ instructionsCopiedFrom: [30] });
+    expect(review.content).toContain("Copied Josh's instructions from #30");
+    expect(descriptionOf(0)).toBe(
+      "Review the pull request.<br><br>Instructions from Josh (copied from #30):<br>- Review: ask for one change.<br>- QA Test: fail once with a Defect.",
+    );
+
+    // An agent's own copy is kept and not repeated; a copy further up counts as the same text.
+    s.ado.items.get(31)!.fields["System.Description"] = "Outcome.<br><br>Instructions from Josh (copied from #30):<br>- Review: ask for one change.<br>- QA Test: fail once with a Defect.";
+    const qa = await s.call(
+      TOOL_NAMES.createWorkItem,
+      { parentId: 32, type: "QA Test", title: "Test", description: "Steps.\n\nInstructions from Josh:\n- Review: ask for one change.\n- QA Test: fail once with a Defect." },
+      "tiamat",
+    );
+    expect(qa.data).not.toHaveProperty("instructionsCopiedFrom");
+    expect(descriptionOf(1)).toBe("Steps.<br><br>Instructions from Josh:<br>- Review: ask for one change.<br>- QA Test: fail once with a Defect.");
+  });
+
+  it("ado_create_work_item fills Repro Steps on a Defect (ADO requires it), from reproSteps or the description", async () => {
+    const s = setup();
+    const opsOf = (i: number) => s.ado.writes()[i]!.body as Array<{ path: string; value: unknown }>;
+    const repro = (i: number) => opsOf(i).find((o) => o.path === "/fields/Microsoft.VSTS.TCM.ReproSteps")?.value;
+
+    const given = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "Date prefix", description: "Line 2 lacks Date:", reproSteps: "1. cat file\nExpected: Date: x\nActual: x" });
+    expect(given.error).toBeUndefined();
+    expect(repro(0)).toBe("1. cat file<br>Expected: Date: x<br>Actual: x");
+
+    const fromDescription = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "Date prefix", description: "Steps: cat file" });
+    expect(fromDescription.error).toBeUndefined();
+    expect(repro(1)).toBe("Steps: cat file");
+
+    expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "No steps" })).error).toMatch(/a Defect requires `reproSteps`/);
+    expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Task", title: "t", reproSteps: "x" })).error).toMatch(/a Task has no repro steps field/);
+    expect(s.ado.writes()).toHaveLength(2);
+  });
+
+  it("ado_create_work_item checks the fields ADO requires on the type before creating (a Defect needing acceptance criteria)", async () => {
+    const s = setup();
+    s.ado.typeFields.Defect = [
+      { referenceName: "System.Title", name: "Title", alwaysRequired: true },
+      { referenceName: "System.Description", name: "Description" },
+      { referenceName: "Microsoft.VSTS.TCM.ReproSteps", name: "Repro Steps", alwaysRequired: true },
+      { referenceName: "Microsoft.VSTS.Common.AcceptanceCriteria", name: "Acceptance Criteria", alwaysRequired: true },
+      { referenceName: "Microsoft.VSTS.Common.Priority", name: "Priority", alwaysRequired: true, defaultValue: 2 },
+    ];
+    const ac = (i: number) => (s.ado.writes()[i]!.body as Array<{ path: string; value: unknown }>).find((o) => o.path === "/fields/Microsoft.VSTS.Common.AcceptanceCriteria")?.value;
+
+    const missing = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "Date prefix", description: "Line 2 lacks Date:" });
+    expect(missing.error).toMatch(/a Defect requires `acceptanceCriteria`/);
+    expect(s.ado.writes()).toHaveLength(0);
+
+    const ok = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "Date prefix", description: "Line 2 lacks Date:", acceptanceCriteria: "Line 2 starts with Date: " });
+    expect(ok.error).toBeUndefined();
+    expect(ac(0)).toBe("Line 2 starts with Date: ");
+
+    // A required custom field with no default is named before anything is sent.
+    s.ado.typeFields.Defect.push({ referenceName: "Custom.Severity", name: "Severity", alwaysRequired: true });
+    const custom = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "x", description: "y", acceptanceCriteria: "z" });
+    expect(custom.error).toMatch(/"Severity" \(Custom.Severity\), which this tool cannot fill/);
+    expect(s.ado.writes()).toHaveLength(1);
+  });
+
+  it("instructions: extraction and the types that do not take them", () => {
+    expect(extractInstructions("<div>Intro</div><div>Instructions from Josh: be brief</div>")).toBe("be brief");
+    expect(extractInstructions("No instructions here")).toBeNull();
+    expect(extractInstructions(undefined)).toBeNull();
+    const epic = { id: 1, rev: 1, url: "", fields: { "System.Description": "Instructions from Josh:<br>x" } };
+    expect(instructionsToCarry("Defect", null, [epic])).toEqual([]);
+    expect(instructionsToCarry("Task", null, [epic])).toEqual([{ sourceId: 1, text: "x" }]);
+    expect(withInstructions(null, [{ sourceId: 1, text: "x" }])).toBe("Instructions from Josh (copied from #1):\nx");
   });
 
   it("ado_create_work_item writes acceptance criteria, and refuses them for a type without the field", async () => {

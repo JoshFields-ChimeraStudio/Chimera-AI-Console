@@ -13,6 +13,7 @@ import { registerBacklogFeatures, type BacklogFeatures, type LastFullSync, type 
 import { notifyBacklogChanged } from "./backlog/notify.js";
 import { createPullRequestNotifier, type PullRequestNotifier } from "./pullrequests/index.js";
 import { createWorkItemWatcher, type WorkItemWatcher } from "./watch/index.js";
+import { registerSmokeTest } from "./smoke/index.js";
 import type { WorkItemCacheRepository } from "./backlog/repository.js";
 
 /** How far back the very first catch-up looks when there is no watermark yet. */
@@ -64,6 +65,7 @@ export interface AdoPluginConfig {
   serviceBusConnection: unknown;
   queueName?: string;
   serviceAccountName?: string;
+  smokeTestAgent?: string;
 }
 
 export interface LastEventRecord {
@@ -543,6 +545,16 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       });
       // The agents' assignment tool shares the Backlog view's assignment path.
       tools = registerAgentTools(deps, links, backlog.assigner);
+      // A10: the smoke-test Epic, created and cleaned up from a dashboard widget.
+      registerSmokeTest({
+        deps,
+        assigner: backlog.assigner,
+        async smokeTestAgent(companyId) {
+          const config = (await c.config.get(companyId)) as Partial<AdoPluginConfig>;
+          const name = typeof config.smokeTestAgent === "string" ? config.smokeTestAgent.trim() : "";
+          return name || null;
+        },
+      });
       // Pull request completed, abandoned or commented on: tell and wake the agent on the linked task.
       pullRequests = createPullRequestNotifier({ ctx: c, findTaskForWorkItem: links.findTaskForWorkItem });
       // ADO drives the linked task: it stays open until the work item is final, and others' changes wake its agent.

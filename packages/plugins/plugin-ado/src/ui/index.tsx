@@ -3,6 +3,7 @@ import { usePluginAction, usePluginData, type PluginWidgetProps } from "@papercl
 import type { AdoStatus } from "../worker.js";
 import type { IssueLinkData } from "../links/index.js";
 import type { NeedsJoshData, NeedsJoshItem } from "../backlog/index.js";
+import type { CleanUpResult, SmokeData, StartResult } from "../smoke/index.js";
 
 // Keys match LINK_DATA_KEYS / LINK_ACTION_KEYS in ../links/index.ts (not imported, to keep worker code out of the UI bundle).
 const LINK_DATA_KEY = "issue-link";
@@ -310,5 +311,102 @@ export function AdoNeedsJosh({ context }: PluginWidgetProps) {
         </div>
       ) : null}
     </span>
+  );
+}
+
+// Keys match SMOKE_DATA_KEY / SMOKE_ACTION_KEYS in ../smoke/index.ts (not imported, to keep worker code out of the UI bundle).
+const SMOKE_DATA_KEY = "smoke-test";
+const SMOKE_START = "smoke-test-start";
+const SMOKE_CLEAN_UP = "smoke-test-clean-up";
+
+function cleanUpText(r: CleanUpResult | null): string {
+  if (!r) return "";
+  const parts = [`${r.removed.length} closed`];
+  if (r.alreadyFinal.length) parts.push(`${r.alreadyFinal.length} already closed`);
+  if (r.failed.length) parts.push(`${r.failed.length} failed: ${r.failed.map((f) => `#${f.id} ${f.error}`).join("; ")}`);
+  if (r.truncated) parts.push("stopped at the item limit");
+  return parts.join(", ");
+}
+
+/**
+ * Dashboard widget (A10): start a smoke-test Epic (cleaning up the previous one first),
+ * or clean up the current one, and Josh's own steps for the run.
+ */
+export function AdoSmokeTest({ context }: PluginWidgetProps) {
+  const companyId = context.companyId;
+  const { data, loading, error, refresh } = usePluginData<SmokeData>(SMOKE_DATA_KEY, { companyId });
+  const start = usePluginAction(SMOKE_START);
+  const cleanUp = usePluginAction(SMOKE_CLEAN_UP);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function run(kind: "start" | "clean-up") {
+    if (kind === "start" && data?.epic && !window.confirm(`Close every open item under smoke-test Epic #${data.epic.id} and start a new one?`)) return;
+    if (kind === "clean-up" && !window.confirm(`Close every open item under smoke-test Epic #${data?.epic?.id}?`)) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      if (kind === "start") {
+        const res = (await start({ companyId })) as StartResult;
+        const cleaned = res.cleanedUp ? ` Previous smoke test: ${cleanUpText(res.cleanedUp)}.` : "";
+        setMessage(`Created Epic #${res.epicId} and assigned it to ${res.assignedTo}.${cleaned}`);
+      } else {
+        const res = (await cleanUp({ companyId })) as CleanUpResult | null;
+        setMessage(res ? `Cleaned up: ${cleanUpText(res)}.` : "There was no smoke test to clean up.");
+      }
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  }
+
+  if (!companyId) return <div>Select a company to run the smoke test.</div>;
+  if (loading && !data) return <div>Loading the smoke test…</div>;
+  if (error) return <div>Smoke test unavailable: {error.message}</div>;
+  if (!data?.configured) return <div>The Azure DevOps plugin is not configured for this company.</div>;
+  if (!data.agentName) return <div>Set the smoke-test agent in the Azure DevOps settings to use the smoke test.</div>;
+
+  const epic = data.epic;
+  return (
+    <div style={{ display: "grid", gap: "0.4rem" }}>
+      <div>
+        {epic ? (
+          <>
+            Current:{" "}
+            {epic.url ? (
+              <a href={epic.url} target="_blank" rel="noreferrer">
+                #{epic.id}
+              </a>
+            ) : (
+              `#${epic.id}`
+            )}{" "}
+            {epic.title} · <strong>{epic.state}</strong>
+          </>
+        ) : (
+          "No smoke test running."
+        )}
+      </div>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+        <button type="button" onClick={() => void run("start")} disabled={busy}>
+          {busy ? "Working…" : epic ? "Reset and start a new smoke test" : `Start a smoke test (assigned to ${data.agentName})`}
+        </button>
+        {epic ? (
+          <button type="button" onClick={() => void run("clean-up")} disabled={busy}>
+            Clean up
+          </button>
+        ) : null}
+      </div>
+      {message ? <div>{message}</div> : null}
+      <details>
+        <summary>Your part</summary>
+        <ol style={{ margin: "0.25rem 0 0", paddingLeft: "1.2rem" }}>
+          {data.joshSteps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
+      </details>
+    </div>
   );
 }

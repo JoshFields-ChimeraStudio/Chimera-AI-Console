@@ -63,6 +63,13 @@ export interface JsonPatchOp {
   value?: unknown;
 }
 
+export interface AdoWorkItemTypeField {
+  referenceName: string;
+  name: string;
+  alwaysRequired: boolean;
+  hasDefault: boolean;
+}
+
 export interface AdoWorkItemState {
   name: string;
   /** Proposed, InProgress, Resolved, Completed or Removed. */
@@ -308,6 +315,19 @@ export class AdoClient {
       `/_apis/wit/workitemtypes/${encodeURIComponent(type)}/states?api-version=${ADO_API_VERSION}`,
     );
     return res.value.map((s) => ({ name: s.name, category: s.category ?? "" }));
+  }
+
+  /** The fields of a work item type in the project's process, with whether each is always required and has a default. */
+  async getWorkItemTypeFields(type: string): Promise<AdoWorkItemTypeField[]> {
+    const res = await this.request<{ value: Array<{ referenceName: string; name?: string; alwaysRequired?: boolean; defaultValue?: unknown }> }>(
+      `/_apis/wit/workitemtypes/${encodeURIComponent(type)}/fields?$expand=all&api-version=${ADO_API_VERSION}`,
+    );
+    return res.value.map((f) => ({
+      referenceName: f.referenceName,
+      name: f.name ?? f.referenceName,
+      alwaysRequired: f.alwaysRequired === true,
+      hasDefault: f.defaultValue !== undefined && f.defaultValue !== null && f.defaultValue !== "",
+    }));
   }
 
   /** All work item types of the project, with their colours and (usually) their states. */

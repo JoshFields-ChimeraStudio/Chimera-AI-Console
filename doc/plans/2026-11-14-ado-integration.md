@@ -76,6 +76,14 @@ A global toolbar button from the plugin ("ADO · N need you", `AdoNeedsJosh` in 
 
 The button refreshes every 30 seconds. With Josh's permission (a button in the list), the browser shows a Windows notification for each new wait while any Paperclip tab is open; clicking it opens the item's Backlog page. What has been seen is kept per browser (localStorage), so the first load and reloads do not notify again. Notifications with every tab closed would need a service worker and web push, which is not built. Waits from Paperclip itself (approvals, failed runs, budget stops) are the rest of D4.
 
+## A10: the smoke-test Epic
+
+A dashboard widget, "Azure DevOps smoke test" (`AdoSmokeTest`, worker code in `src/smoke/`), on only when the **Smoke-test agent** setting names an agent.
+- **Start** creates an Epic "Smoke test: full workflow (<time> UTC)" with the standard description and acceptance criteria (`smokeDescription`, the one copy). Each run names a new file to add (`smoke/hello-<yyyymmdd-hhmmss>.txt`, from the creation time), so a run never finds the previous run's file already on main. It assigns the Epic to the smoke-test agent through the Backlog view's assignment path, as the board user who pressed it. The Epic's ID is kept in plugin state (`smoke-test-epic`).
+- If a smoke test already exists, Start first does Clean up, and creates nothing if any item could not be closed.
+- **Clean up** walks the Epic's tree (at most 200 items) and sets every item that is not Completed or Removed to Removed (Completed for a type with no Removed state), parents before children, signed `[ADO plugin]`. A closed parent cannot roll up and its closed task wakes no one, so children closed after it change nothing. Open pull requests are left alone.
+- Only a board user can run either action. The widget also lists Josh's own steps (request changes on the Document once, approve the plan and the breakdown, merge).
+
 ## Constraints found that affect later items
 
 - **Task UI (A2, built):** the chip ("ADO #123 · Active", linking to the item) and the link/unlink control are a `toolbarButton` slot on the task (capability `ui.action.register`). Core changes, not a plugin list page, give one task list: a "Linked to ADO" filter (exact `originKind`, the same URL parameter as the routine filter) and search by ADO ID through `origin_id` (only for linked-task origins, case-insensitive). Links are refreshed by events and catch-up (newer revisions only); A2 never creates tasks. A 404 from ADO marks the link "not found in ADO" rather than deleting it; it clears when the item is seen again. The chip is not shown in task list rows. After link or unlink the core task header is not refreshed by the plugin: the plugin UI SDK has no bridge to invalidate host data (the header does not show the origin, so nothing visible is stale).

@@ -145,7 +145,13 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
           type: "string",
           maxLength: 20000,
           description:
-            "Optional acceptance criteria, as plain text, one criterion per line. Only for types that have the field (Epic, Feature, User Story); for other types put them in the description.",
+            "Acceptance criteria, as plain text, one criterion per line. Only for types that have the field (Epic, Feature, User Story, and in this project Defect, where it is required: what must be true once the Defect is fixed); for other types put them in the description. The reply says if the type has no such field or requires it.",
+        },
+        reproSteps: {
+          type: "string",
+          maxLength: 20000,
+          description:
+            "Steps to reproduce, as plain text: the steps, the expected and the actual result. Only for a Defect or a Bug, where ADO requires it; if you leave it out, the description is used.",
         },
         assignTo: { type: "string", minLength: 1, description: "Optional: name of the agent to assign the new item to." },
       },

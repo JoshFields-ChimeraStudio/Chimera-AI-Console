@@ -51,6 +51,7 @@ import { TOOL_DECLARATIONS, TOOL_NAMES, type AdoToolName } from "./definitions.j
 import { attributedHtml, htmlToText, textToHtml } from "./html.js";
 import { ROLE_POLICIES, pruneBindings, resolveRole, roleAllows, type AdoRole, type RoleBindings, type RoleBindingStore } from "./roles.js";
 import { agentTag, hasOnlyAgentTag, withAgentTag } from "./tags.js";
+import { MAX_ANCESTORS, instructionsToCarry, withInstructions } from "../workflow/instructions.js";
 
 /** Work item type states change rarely; cache them briefly per company and type. */
 const STATE_CACHE_MS = 10 * 60 * 1000;
@@ -499,13 +500,43 @@ export function registerAgentTools(
       const title = requiredText(params.title, "title").trim();
       const description = optionalText(params.description, "description");
       const acceptanceCriteria = optionalText(params.acceptanceCriteria, "acceptanceCriteria");
+      const givenReproSteps = optionalText(params.reproSteps, "reproSteps");
       const assignTo = optionalText(params.assignTo, "assignTo")?.trim() ?? null;
       const { role } = caller;
       // Refuse a type the role may not create before reading anything.
       if (!rolesThatMayCreate(type).includes(role)) throw new ToolFailure(denial(decideCreate({ role, type, parentType: null })));
-      if (acceptanceCriteria && !typeHasAcceptanceCriteria(type)) {
+      // Which fields the type has and requires, from ADO (TF401320 on Defects in smoke test #868: Repro Steps,
+      // then Acceptance Criteria). If ADO cannot say, fall back to the Agile defaults below.
+      const typeFields = await ado
+        .getWorkItemTypeFields(type)
+        .then((list) => new Map(list.map((f) => [f.referenceName.toLowerCase(), f])))
+        .catch(() => null);
+      const hasField = (ref: string, fallback: boolean) => (typeFields ? typeFields.has(ref.toLowerCase()) : fallback);
+      const isRequired = (ref: string) => typeFields?.get(ref.toLowerCase())?.alwaysRequired === true;
+      if (acceptanceCriteria && !hasField(ACCEPTANCE_CRITERIA_FIELD, typeHasAcceptanceCriteria(type))) {
         throw new ToolFailure(`Nothing was created: a ${type} has no acceptance criteria field; put the criteria in the description.`);
       }
+      if (givenReproSteps && !hasField(REPRO_STEPS_FIELD, typeHasReproSteps(type))) {
+        throw new ToolFailure(`Nothing was created: a ${type} has no repro steps field; put them in the description.`);
+      }
+      // Repro Steps fall back to the description.
+      const reproSteps = hasField(REPRO_STEPS_FIELD, typeHasReproSteps(type)) ? (givenReproSteps ?? description) : null;
+      const missing: string[] = [];
+      if (isRequired("System.Description") && !description?.trim()) missing.push("`description`");
+      if (isRequired(ACCEPTANCE_CRITERIA_FIELD) && !acceptanceCriteria?.trim()) {
+        missing.push("`acceptanceCriteria` (for a Defect: what must be true once it is fixed, one per line)");
+      }
+      if ((isRequired(REPRO_STEPS_FIELD) || type.trim().toLowerCase() === "defect") && !reproSteps?.trim()) {
+        missing.push("`reproSteps` (the steps to reproduce, with the expected and actual result; the description is used if you leave it out)");
+      }
+      const filled = new Set(["system.description", ACCEPTANCE_CRITERIA_FIELD.toLowerCase(), REPRO_STEPS_FIELD.toLowerCase()]);
+      for (const f of typeFields?.values() ?? []) {
+        const ref = f.referenceName.toLowerCase();
+        if (f.alwaysRequired && !f.hasDefault && !ref.startsWith("system.") && !filled.has(ref)) {
+          missing.push(`the field "${f.name}" (${f.referenceName}), which this tool cannot fill: ask Josh to make it optional or give it a default`);
+        }
+      }
+      if (missing.length) throw new ToolFailure(`Nothing was created: a ${type} requires ${missing.join("; ")}.`);
       const givenParent = params.parentId !== undefined && params.parentId !== null;
       let parent: AdoWorkItem | null = null;
       let parentId: number | null = null;
@@ -526,12 +557,16 @@ export function registerAgentTools(
         const pre = decideAssignment({ ...input, parentAssigneeAgentId: parentTask?.assigneeAgentId ?? null });
         if (!pre.ok) throw new ToolFailure(`Nothing was created: ${denial(pre)}`);
       }
+      // Josh's instructions on the items above travel down to the new one (workflow/instructions.ts).
+      const carried = parent ? instructionsToCarry(type, description, await ancestorsOf(ado, parent)) : [];
+      const fullDescription = withInstructions(description, carried);
       const ops: JsonPatchOp[] = [
         { op: "add", path: "/fields/System.Title", value: title },
-        ...(description ? [{ op: "add" as const, path: "/fields/System.Description", value: textToHtml(description) }] : []),
+        ...(fullDescription ? [{ op: "add" as const, path: "/fields/System.Description", value: textToHtml(fullDescription) }] : []),
         ...(acceptanceCriteria
-          ? [{ op: "add" as const, path: "/fields/Microsoft.VSTS.Common.AcceptanceCriteria", value: textToHtml(acceptanceCriteria) }]
+          ? [{ op: "add" as const, path: `/fields/${ACCEPTANCE_CRITERIA_FIELD}`, value: textToHtml(acceptanceCriteria) }]
           : []),
+        ...(reproSteps ? [{ op: "add" as const, path: `/fields/${REPRO_STEPS_FIELD}`, value: textToHtml(reproSteps) }] : []),
         ...(parent ? [...inherit(parent, "System.AreaPath"), ...inherit(parent, "System.IterationPath")] : []),
         { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, parentId ? `Created as a child of #${parentId}.` : "Created.") },
         { op: "add", path: "/fields/System.Tags", value: agentTag(caller.agentName) },
@@ -542,6 +577,10 @@ export function registerAgentTools(
       await audit(caller, "work_item_created", created.id, `created ${type} ADO #${created.id}${where}`, { parentId, type, title, rule: decision.rule });
       const data: Record<string, unknown> = { workItemId: created.id, parentId, type, url: ado.webUrl(created.id) };
       let content = `Created ${type} #${created.id} "${title}"${where}: ${ado.webUrl(created.id)}`;
+      if (carried.length) {
+        data.instructionsCopiedFrom = carried.map((c) => c.sourceId);
+        content += `\nCopied Josh's instructions from ${carried.map((c) => `#${c.sourceId}`).join(", ")} into its description.`;
+      }
       if (target) {
         // The item exists now: report a refused or failed assignment in the reply, not as an error, so it is not created twice.
         try {
@@ -818,6 +857,31 @@ function assignedMeta(target: Agent, result: AssignDetails): Record<string, unkn
 
 /** Types that have Custom.TechnicalNotes in the Chimera process. */
 const TECHNICAL_NOTES_TYPES = new Set(["epic", "feature", "user story", "bug", "task"]);
+
+/** The parent and the items above it, nearest first (at most MAX_ANCESTORS; a missing one ends the walk). */
+async function ancestorsOf(ado: AdoClient, parent: AdoWorkItem): Promise<AdoWorkItem[]> {
+  const out = [parent];
+  const seen = new Set([parent.id]);
+  let next = Number(parent.fields["System.Parent"] ?? 0);
+  while (next > 0 && out.length < MAX_ANCESTORS && !seen.has(next)) {
+    seen.add(next);
+    const item = await ado.getWorkItem(next).catch(() => null);
+    if (!item) break;
+    out.push(item);
+    next = Number(item.fields["System.Parent"] ?? 0);
+  }
+  return out;
+}
+
+const ACCEPTANCE_CRITERIA_FIELD = "Microsoft.VSTS.Common.AcceptanceCriteria";
+const REPRO_STEPS_FIELD = "Microsoft.VSTS.TCM.ReproSteps";
+
+/** Fallbacks when ADO cannot list a type's fields: the types that have Microsoft.VSTS.TCM.ReproSteps. */
+const REPRO_STEPS_TYPES = new Set(["defect", "bug"]);
+
+function typeHasReproSteps(type: string): boolean {
+  return REPRO_STEPS_TYPES.has(type.trim().toLowerCase());
+}
 
 /** Types of the Agile process that have Microsoft.VSTS.Common.AcceptanceCriteria. */
 const ACCEPTANCE_CRITERIA_TYPES = new Set(["epic", "feature", "user story"]);
