@@ -1395,6 +1395,7 @@ export function buildHostServices(
         cachedInputTokens: 0,
         outputTokens: 0,
         billingCode: billingCode ?? null,
+        breakdown: [],
       };
     }
     const scopeCondition = scopeConditions.length === 1 ? scopeConditions[0]! : and(...scopeConditions);
@@ -1407,6 +1408,23 @@ export function buildHostServices(
       })
       .from(costEvents)
       .where(and(eq(costEvents.companyId, companyId), scopeCondition));
+    // Fork patch 16: the same totals by agent, model and billing type, so a plugin can price
+    // subscription usage per model (the ADO plugin's cost per Feature, BACKLOG D9).
+    const breakdownRows = await db
+      .select({
+        agentId: costEvents.agentId,
+        provider: costEvents.provider,
+        model: costEvents.model,
+        billingType: costEvents.billingType,
+        events: sql<number>`count(*)::double precision`,
+        costCents: sql<number>`coalesce(sum(${costEvents.costCents}), 0)::double precision`,
+        inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::double precision`,
+        cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::double precision`,
+        outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::double precision`,
+      })
+      .from(costEvents)
+      .where(and(eq(costEvents.companyId, companyId), scopeCondition))
+      .groupBy(costEvents.agentId, costEvents.provider, costEvents.model, costEvents.billingType);
 
     return {
       costCents: Number(row?.costCents ?? 0),
@@ -1414,6 +1432,17 @@ export function buildHostServices(
       cachedInputTokens: Number(row?.cachedInputTokens ?? 0),
       outputTokens: Number(row?.outputTokens ?? 0),
       billingCode: billingCode ?? null,
+      breakdown: breakdownRows.map((r) => ({
+        agentId: r.agentId ?? null,
+        provider: r.provider,
+        model: r.model,
+        billingType: r.billingType,
+        events: Number(r.events ?? 0),
+        costCents: Number(r.costCents ?? 0),
+        inputTokens: Number(r.inputTokens ?? 0),
+        cachedInputTokens: Number(r.cachedInputTokens ?? 0),
+        outputTokens: Number(r.outputTokens ?? 0),
+      })),
     };
   };
 

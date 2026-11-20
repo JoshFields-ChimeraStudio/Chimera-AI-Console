@@ -1349,12 +1349,33 @@ export interface PluginIssueApprovalSummary {
   createdAt: string;
 }
 
+export interface PluginIssueCostBreakdownRow {
+  agentId: string | null;
+  provider: string;
+  model: string;
+  /** For example `subscription_included`, `api` or `metered_api`. */
+  billingType: string;
+  /** Cost events in this row (about one per run). */
+  events: number;
+  costCents: number;
+  /** Uncached input, including cache writes. */
+  inputTokens: number;
+  /** Cache reads. */
+  cachedInputTokens: number;
+  outputTokens: number;
+}
+
 export interface PluginIssueCostSummary {
   costCents: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
   billingCode: string | null;
+  /**
+   * The same totals split by agent, model and billing type (fork patch 16: the ADO
+   * plugin prices subscription usage at API rates per model for its cost per Feature).
+   */
+  breakdown?: PluginIssueCostBreakdownRow[];
 }
 
 export interface PluginBudgetIncidentSummary {

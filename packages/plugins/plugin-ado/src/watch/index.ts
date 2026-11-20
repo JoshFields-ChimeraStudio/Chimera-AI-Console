@@ -43,6 +43,8 @@ export interface WatchDeps {
   ctx: Pick<PluginContext, "state" | "issues" | "agents" | "logger">;
   findTaskForWorkItem(companyId: string, workItemId: number): Promise<Issue | null>;
   serviceAccountName(companyId: string): Promise<string | null>;
+  /** Called once when a work item reaches Completed and its open task is closed (D9: the cost report). */
+  onCompleted?(companyId: string, item: WorkItemSummary, task: Issue): Promise<void>;
 }
 
 /** What was last handled for one work item. */
@@ -202,6 +204,11 @@ export function createWorkItemWatcher(deps: WatchDeps) {
     const status = lower(item.state) === "removed" ? "cancelled" : "done";
     await ctx.issues.update(task.id, { status }, companyId);
     await ctx.issues.createComment(task.id, `ADO #${item.id} is **${item.state}**, so this task is closed.`, companyId);
+    if (status === "done" && deps.onCompleted) {
+      await deps.onCompleted(companyId, item, task).catch((err) =>
+        ctx.logger.warn("ADO on-completed hook failed", { companyId, workItemId: item.id, error: err instanceof Error ? err.message : String(err) }),
+      );
+    }
     return true;
   }
 

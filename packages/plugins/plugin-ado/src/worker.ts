@@ -14,6 +14,7 @@ import { notifyBacklogChanged } from "./backlog/notify.js";
 import { createPullRequestNotifier, type PullRequestNotifier } from "./pullrequests/index.js";
 import { createWorkItemWatcher, type WorkItemWatcher } from "./watch/index.js";
 import { registerSmokeTest } from "./smoke/index.js";
+import { createCostReporter, type CostReporterOptions } from "./costs/index.js";
 import type { WorkItemCacheRepository } from "./backlog/repository.js";
 
 /** How far back the very first catch-up looks when there is no watermark yet. */
@@ -132,6 +133,8 @@ export interface AdoPluginOptions {
   linkRepository?: (ctx: PluginContext) => LinkRepository;
   /** Work item cache storage (Backlog view); tests pass an in-memory one. */
   workItemCacheRepository?: (ctx: PluginContext) => WorkItemCacheRepository;
+  /** Cost report timing (D9); tests pass a synchronous timer. */
+  costReporter?: Omit<CostReporterOptions, "deps">;
 }
 
 export function createAdoPlugin(options: AdoPluginOptions = {}) {
@@ -558,13 +561,17 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       // Pull request completed, abandoned or commented on: tell and wake the agent on the linked task.
       pullRequests = createPullRequestNotifier({ ctx: c, findTaskForWorkItem: links.findTaskForWorkItem });
       // ADO drives the linked task: it stays open until the work item is final, and others' changes wake its agent.
+      // D9: a Feature's or Epic's cost, written to ADO once its runs have finished.
+      const costReporter = createCostReporter({ deps, ...options.costReporter });
       watcher = createWorkItemWatcher({
         ctx: c,
         findTaskForWorkItem: links.findTaskForWorkItem,
         async serviceAccountName(companyId) {
           return (await deps.settings(companyId))?.serviceAccountName ?? null;
         },
+        onCompleted: costReporter.onCompleted,
       });
+      void costReporter.resume().catch((err) => c.logger.warn("ADO cost reports could not be resumed", { error: err instanceof Error ? err.message : String(err) }));
 
       // A linked task's status or agent shows on its Backlog row, so tell the page when
       // one changes. Only tasks linked to ADO, and only a "changed" signal is sent.

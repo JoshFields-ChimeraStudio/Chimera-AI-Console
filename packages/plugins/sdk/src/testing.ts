@@ -2064,6 +2064,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
               cachedInputTokens: 0,
               outputTokens: 0,
               billingCode: input.billingCode ?? null,
+              breakdown: [],
             },
             openBudgetIncidents: [],
             invocationBlocks: [],

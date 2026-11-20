@@ -861,6 +861,20 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       cachedInputTokens: 3,
       outputTokens: 6,
     });
+    // Fork patch 16: the same totals by agent, model and billing type.
+    expect(summary.costs.breakdown).toEqual([
+      {
+        agentId,
+        provider: "test",
+        model: "unit",
+        billingType: "unknown",
+        events: 2,
+        costCents: 300,
+        inputTokens: 30,
+        cachedInputTokens: 3,
+        outputTokens: 6,
+      },
+    ]);
   });
 
   it("rejects a human-attributed plugin comment when actorUserId is not an active company member", async () => {

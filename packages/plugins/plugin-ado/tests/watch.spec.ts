@@ -71,13 +71,16 @@ function setup() {
     agents: { get: vi.fn(async (id: string) => ({ id, name: names[id] })) },
     logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
   };
+  const onCompleted = vi.fn(async (..._a: unknown[]) => {});
   const watcher = createWorkItemWatcher({
     ctx: ctx as any,
     findTaskForWorkItem: async (_c, id) => tasks[id] ?? null,
     serviceAccountName: async () => SVC,
+    onCompleted,
   });
   return {
     watcher,
+    onCompleted,
     ado,
     issues,
     state,
@@ -264,6 +267,9 @@ describe("the work item drives its task", () => {
     s.setUpdates([upd(7, "Josh", stateChange("New", "Removed"))]);
     await s.change(summary(811, "Removed", 7));
     expect(s.issues.update).toHaveBeenLastCalledWith("task-maple", { status: "cancelled" }, CO);
+    // D9: told once, for the Completed close only (the cost reporter picks Features and Epics).
+    expect(s.onCompleted).toHaveBeenCalledTimes(1);
+    expect(s.onCompleted).toHaveBeenCalledWith(CO, expect.objectContaining({ id: 811, state: "Completed" }), expect.objectContaining({ id: "task-maple" }));
   });
 
   it("reopens a done task when someone moves its item out of a final state", async () => {

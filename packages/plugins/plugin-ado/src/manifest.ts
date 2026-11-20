@@ -34,6 +34,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "agents.read",
     "activity.log.write",
     "issues.read",
+    "issues.orchestration.read",
     "issues.update",
     "issues.create",
     "issues.wakeup",
