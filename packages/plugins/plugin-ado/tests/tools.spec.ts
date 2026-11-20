@@ -64,6 +64,10 @@ interface FakeItem {
 
 /** A small in-memory ADO that speaks the REST calls the tools make. */
 class FakeAdo {
+  /** Repository files by version (branch name or commit), path to text. */
+  files = new Map<string, Record<string, string>>();
+  prChanges: Array<{ changeType: string; item: { path: string; isFolder?: boolean }; originalPath?: string }> = [];
+  wiqlQueries: string[] = [];
   /** Fields of a type as ADO lists them; a type not here answers 404, so the tool falls back to its defaults. */
   typeFields: Record<string, Array<{ referenceName: string; name: string; alwaysRequired?: boolean; defaultValue?: unknown }>> = {};
   items = new Map<number, FakeItem>();
@@ -182,6 +186,31 @@ class FakeAdo {
     if ((m = path.match(/^\/_apis\/wit\/workItems\/(\d+)\/updates$/))) {
       const skip = Number(new URL(url).searchParams.get("$skip") ?? 0);
       return Response.json({ value: (this.updates.get(Number(m[1])) ?? []).slice(skip, skip + 200) });
+    }
+    // A8 read tools: files at a version, a pull request's last iteration and its changes, WIQL and batch reads.
+    if ((m = path.match(/^\/_apis\/git\/repositories\/([^/]+)\/items$/))) {
+      const q = new URL(url).searchParams;
+      const version = q.get("versionDescriptor.version")!;
+      const files = this.files.get(version) ?? {};
+      const wanted = "/" + q.get("path")!.replace(/^\/+/, "").replace(/\/+$/, "");
+      if (q.get("includeContent") === "true") return Response.json({ content: files[wanted], commitId: "c".repeat(40) });
+      if (wanted in files) return Response.json({ value: [{ path: wanted, isFolder: false }] });
+      const kids = Object.keys(files).filter((p) => p.startsWith(wanted === "/" ? "/" : `${wanted}/`));
+      if (!kids.length) return Response.json({ message: "TF401174: not found" }, { status: 404 });
+      return Response.json({ value: [{ path: wanted, isFolder: true }, ...kids.map((p) => ({ path: p, isFolder: false }))] });
+    }
+    if ((m = path.match(/^\/_apis\/git\/repositories\/[^/]+\/pullRequests\/(\d+)\/iterations$/))) {
+      return Response.json({ value: [{ id: 1 }, { id: 2, sourceRefCommit: { commitId: "src" }, commonRefCommit: { commitId: "base" } }] });
+    }
+    if ((m = path.match(/^\/_apis\/git\/repositories\/[^/]+\/pullRequests\/(\d+)\/iterations\/2\/changes$/))) {
+      return Response.json({ changeEntries: this.prChanges });
+    }
+    if (path === "/_apis/wit/wiql") {
+      this.wiqlQueries.push(body.query);
+      return Response.json({ workItems: [...this.items.keys()].filter((id) => String(this.items.get(id)!.fields["System.Title"] ?? "").toLowerCase().includes("greeting")).map((id) => ({ id })) });
+    }
+    if (path === "/_apis/wit/workitemsbatch") {
+      return Response.json({ value: body.ids.map((id: number) => this.items.get(id) ?? null) });
     }
     if ((m = path.match(/^\/_apis\/git\/repositories\/([^/]+)$/))) {
       if (decodeURIComponent(m[1]!) !== "SimpleRepo") return Response.json({ message: "repo not found" }, { status: 404 });
@@ -330,7 +359,14 @@ describe("roles", () => {
   });
 
   it("readonly only reads; the create tool goes to the roles the creation table names", () => {
-    expect(ROLE_POLICIES.readonly.tools).toEqual([TOOL_NAMES.getWorkItem, TOOL_NAMES.getWorkflow, TOOL_NAMES.getPullRequestThreads]);
+    expect(ROLE_POLICIES.readonly.tools).toEqual([
+      TOOL_NAMES.getWorkItem,
+      TOOL_NAMES.getWorkflow,
+      TOOL_NAMES.getPullRequestThreads,
+      TOOL_NAMES.getPullRequestChanges,
+      TOOL_NAMES.getFile,
+      TOOL_NAMES.searchWorkItems,
+    ]);
     for (const role of ["director", "planner", "architect", "builder", "reviewer", "qa"] as const) {
       expect(ROLE_POLICIES[role].tools).toContain(TOOL_NAMES.postPullRequestComment);
     }
@@ -374,7 +410,14 @@ describe("host risk rating of tool names", () => {
   it("rates every writing tool as write and the read tool as read", () => {
     for (const t of TOOL_DECLARATIONS) {
       const namespaced = `chimera.plugin-ado:${t.name}`;
-      const reads: string[] = [TOOL_NAMES.getWorkItem, TOOL_NAMES.getWorkflow, TOOL_NAMES.getPullRequestThreads];
+      const reads: string[] = [
+        TOOL_NAMES.getWorkItem,
+        TOOL_NAMES.getWorkflow,
+        TOOL_NAMES.getPullRequestThreads,
+        TOOL_NAMES.getPullRequestChanges,
+        TOOL_NAMES.getFile,
+        TOOL_NAMES.searchWorkItems,
+      ];
       expect([t.name, hostToolRisk(t.name)]).toEqual([t.name, reads.includes(t.name) ? "read" : "write"]);
       expect(hostToolRisk(namespaced)).toBe(hostToolRisk(t.name));
     }
@@ -544,7 +587,7 @@ describe("agent tools", () => {
       const read = await s.call(TOOL_NAMES.getWorkItem, { workItemId: 42 }, "stranger");
       expect(read.error).toBeUndefined();
       const denied = await s.call(TOOL_NAMES.addComment, { workItemId: 42, text: "hi" }, "stranger");
-      expect(denied.error).toMatch(/^Permission denied: Stranger has the ADO role "readonly", which allows only ado_get_work_item, ado_get_workflow, ado_get_pr_threads\./);
+      expect(denied.error).toMatch(/^Permission denied: Stranger has the ADO role "readonly", which allows only ado_get_work_item, ado_get_workflow, ado_get_pr_threads, ado_get_pr_changes, ado_get_file, ado_search_work_items\./);
       expect(s.ado.writes()).toHaveLength(0);
       expect(s.harness.activity).toHaveLength(0);
     });
@@ -833,6 +876,97 @@ describe("agent tools", () => {
     const custom = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Defect", title: "x", description: "y", acceptanceCriteria: "z" });
     expect(custom.error).toMatch(/"Severity" \(Custom.Severity\), which this tool cannot fill/);
     expect(s.ado.writes()).toHaveLength(1);
+  });
+
+  it("repository (A12): technical notes and new items carry a repo tag, and children take their parent's", async () => {
+    const s = setup();
+    const tagsOf = (i: number) => (s.ado.writes()[i]!.body as Array<{ path: string; value: unknown }>).find((o) => o.path === "/fields/System.Tags")?.value;
+
+    const notes = await s.call(TOOL_NAMES.setTechnicalNotes, { workItemId: 42, notes: "Use the cache.", repository: "SimpleRepo" }, "arch");
+    expect(notes.error).toBeUndefined();
+    expect(notes.content).toContain("Repository set to SimpleRepo");
+    expect(String(tagsOf(0))).toMatch(/repo:SimpleRepo/);
+    expect((await s.call(TOOL_NAMES.setTechnicalNotes, { workItemId: 42, notes: "x", repository: "Nope" }, "arch")).error).toMatch(/no repository "Nope"/);
+
+    // #42 now carries the tag: a Review created under it gets it too.
+    s.ado.items.get(42)!.fields["System.Tags"] = "agent:Arch; repo:SimpleRepo";
+    const review = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Review", title: "Code review" }, "tiamat");
+    expect(review.data).toMatchObject({ repository: "SimpleRepo" });
+    expect(tagsOf(1)).toBe("agent:Tiamat; repo:SimpleRepo");
+
+    // Given on creation, it is checked against ADO and written with ADO's spelling.
+    s.ado.items.get(42)!.fields["System.Tags"] = "";
+    const task = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Task", title: "t", repository: "SimpleRepo" }, "tiamat");
+    expect(tagsOf(2)).toBe("agent:Tiamat; repo:SimpleRepo");
+    expect(task.data).toMatchObject({ repository: "SimpleRepo" });
+  });
+
+  it("ado_get_file reads a file with line numbers, in windows, and lists a folder (A8)", async () => {
+    const s = setup();
+    s.ado.files.set("main", { "/docs/prd.md": "# PRD\nLine two\n", "/docs/adr/0001.md": "x" });
+    s.ado.files.set("ai/9-x", { "/docs/prd.md": "changed" });
+    const file = await s.call(TOOL_NAMES.getFile, { repository: "SimpleRepo", path: "docs/prd.md" }, "ladon");
+    expect(file.error).toBeUndefined();
+    expect(file.content).toBe("SimpleRepo docs/prd.md at branch main (commit cccccccc), lines 1-2 of 2:\n    1  # PRD\n    2  Line two");
+    expect((await s.call(TOOL_NAMES.getFile, { repository: "SimpleRepo", path: "/docs/prd.md", branch: "refs/heads/ai/9-x" }, "ladon")).content).toContain("1  changed");
+    const folder = await s.call(TOOL_NAMES.getFile, { repository: "SimpleRepo", path: "docs" }, "ladon");
+    expect(folder.content).toBe("SimpleRepo docs at branch main is a folder with 2 entries:\n/docs/prd.md\n/docs/adr/0001.md");
+    expect((await s.call(TOOL_NAMES.getFile, { repository: "SimpleRepo", path: "nope.md" }, "ladon")).error).toBe("nope.md was not found in SimpleRepo at branch main.");
+
+    s.ado.files.set("main", { "/big.txt": Array.from({ length: 2500 }, (_, i) => `l${i + 1}`).join("\n") });
+    const first = await s.call(TOOL_NAMES.getFile, { repository: "SimpleRepo", path: "big.txt" }, "ladon");
+    expect(first.content).toContain("lines 1-2000 of 2500");
+    expect(first.content).toContain("(500 more lines: call again with startLine 2001.)");
+    expect((await s.call(TOOL_NAMES.getFile, { repository: "SimpleRepo", path: "big.txt", startLine: 2001 }, "ladon")).content).toContain(" 2500  l2500");
+  });
+
+  it("ado_get_pr_changes lists a pull request's files and diffs one against the merge base (A8)", async () => {
+    const s = setup();
+    s.ado.prs.set(7, { id: 7, title: "#42 Story", status: "active", source: "ai/42-story", target: "main", threads: [] } as never);
+    s.ado.prChanges = [
+      { changeType: "edit", item: { path: "/README.md" } },
+      { changeType: "add", item: { path: "/smoke/hello.txt" } },
+      { changeType: "edit", item: { path: "/src", isFolder: true } },
+    ];
+    s.ado.files.set("base", { "/README.md": "a\nb\nc\n" });
+    s.ado.files.set("src", { "/README.md": "a\nB\nc\n", "/smoke/hello.txt": "Hello\n" });
+    const list = await s.call(TOOL_NAMES.getPullRequestChanges, { pullRequestId: 7 }, "ladon");
+    expect(list.content).toBe('Pull request 7 "#42 Story" (active) in SimpleRepo, ai/42-story into main, 2 files changed:\n- edit: /README.md\n- add: /smoke/hello.txt');
+    const edit = await s.call(TOOL_NAMES.getPullRequestChanges, { pullRequestId: 7, filePath: "README.md" }, "ladon");
+    expect(edit.content).toContain("--- a/README.md\n+++ b/README.md\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c");
+    const added = await s.call(TOOL_NAMES.getPullRequestChanges, { pullRequestId: 7, filePath: "/smoke/hello.txt" }, "ladon");
+    expect(added.content).toContain("@@ -0,0 +1,1 @@\n+Hello");
+    expect((await s.call(TOOL_NAMES.getPullRequestChanges, { pullRequestId: 7, filePath: "other.md" }, "ladon")).error).toMatch(/is not among the files/);
+  });
+
+  it("ado_search_work_items finds items by title text, with type and state filters quoted safely (A8)", async () => {
+    const s = setup();
+    s.ado.add(60, "Feature", "New");
+    s.ado.items.get(60)!.fields["System.Title"] = "Greeting file";
+    const res = await s.call(TOOL_NAMES.searchWorkItems, { text: "greeting", type: "Feature", state: "New" }, "ladon");
+    expect(res.content).toBe('1 work item with "greeting" in the title:\n- #60 Feature (New): Greeting file');
+    expect(s.ado.wiqlQueries.at(-1)).toBe(
+      "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Title] CONTAINS 'greeting' AND [System.WorkItemType] = 'Feature' AND [System.State] = 'New' ORDER BY [System.ChangedDate] DESC",
+    );
+    await s.call(TOOL_NAMES.searchWorkItems, { text: "it's" }, "ladon");
+    expect(s.ado.wiqlQueries.at(-1)).toContain("CONTAINS 'it''s'");
+  });
+
+  it("builderRole and forAgent (A6) tag new items for the router, only on the types they fit", async () => {
+    const s = setup();
+    const tagsOf = (i: number) => (s.ado.writes()[i]!.body as Array<{ path: string; value: unknown }>).find((o) => o.path === "/fields/System.Tags")?.value;
+    s.ado.add(31, "Feature", "Refining");
+    const story = await s.call(TOOL_NAMES.createWorkItem, { parentId: 31, type: "User Story", title: "s", builderRole: "backend" }, "tiamat");
+    expect(story.error).toBeUndefined();
+    expect(tagsOf(0)).toBe("agent:Tiamat; builder:backend");
+    expect(story.data).toMatchObject({ builderRole: "backend" });
+    const review = await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Review", title: "r", forAgent: "ladon" }, "tiamat");
+    expect(tagsOf(1)).toBe("agent:Tiamat; for:Ladon");
+    expect(review.data).toMatchObject({ forAgent: "Ladon" });
+    expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Review", title: "r", builderRole: "x" }, "tiamat")).error).toMatch(/builderRole is only for a User Story or Bug/);
+    expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 31, type: "User Story", title: "s", forAgent: "Ladon" }, "tiamat")).error).toMatch(/forAgent is only for a Review, QA Test or Task/);
+    expect((await s.call(TOOL_NAMES.createWorkItem, { parentId: 42, type: "Review", title: "r", forAgent: "Nobody" }, "tiamat")).error).toMatch(/no agent called "Nobody"/);
+    expect(s.ado.writes()).toHaveLength(2);
   });
 
   it("instructions: extraction and the types that do not take them", () => {

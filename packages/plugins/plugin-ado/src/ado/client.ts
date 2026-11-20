@@ -536,6 +536,73 @@ export class AdoClient {
     );
   }
 
+  /**
+   * A path in a repository at a branch or commit: a folder's entries (one level), or a file's text.
+   * `version` is a branch name, or a full commit id with versionType commit.
+   */
+  async getRepositoryItem(
+    repositoryId: string,
+    path: string,
+    version: string,
+    versionType: "branch" | "commit",
+  ): Promise<{ kind: "folder"; entries: Array<{ path: string; isFolder: boolean }> } | { kind: "file"; content: string; commitId: string | null }> {
+    const base =
+      `/_apis/git/repositories/${encodeURIComponent(repositoryId)}/items?path=${encodeURIComponent(path)}` +
+      `&versionDescriptor.version=${encodeURIComponent(version)}&versionDescriptor.versionType=${versionType}`;
+    const list = await this.request<{ value?: Array<{ path: string; isFolder?: boolean; gitObjectType?: string }> }>(
+      `${base}&recursionLevel=OneLevel&api-version=${ADO_API_VERSION}`,
+    );
+    const entries = (list.value ?? []).map((e) => ({ path: e.path, isFolder: e.isFolder === true || e.gitObjectType === "tree" }));
+    // The item itself comes first in a OneLevel listing; ADO spells it "/path" (the root is "/").
+    const wanted = ("/" + path.replace(/^\/+/, "").replace(/\/+$/, "")).toLowerCase();
+    const self = entries.find((e) => e.path.toLowerCase() === wanted);
+    if (!self || self.isFolder) return { kind: "folder", entries: entries.filter((e) => e !== self) };
+    const file = await this.request<{ content?: string; commitId?: string }>(`${base}&includeContent=true&$format=json&api-version=${ADO_API_VERSION}`);
+    return { kind: "file", content: typeof file.content === "string" ? file.content : "", commitId: file.commitId ?? null };
+  }
+
+  /** A pull request's latest iteration: the commits it compares and the files it changes. */
+  async getPullRequestChanges(
+    repositoryId: string,
+    pullRequestId: number,
+  ): Promise<{ iteration: number; sourceCommit: string | null; targetCommit: string | null; changes: Array<{ path: string; changeType: string; originalPath: string | null }> }> {
+    const prPath = `/_apis/git/repositories/${encodeURIComponent(repositoryId)}/pullRequests/${pullRequestId}`;
+    const its = await this.request<{ value: Array<{ id: number; sourceRefCommit?: { commitId?: string }; commonRefCommit?: { commitId?: string }; targetRefCommit?: { commitId?: string } }> }>(
+      `${prPath}/iterations?api-version=${ADO_API_VERSION}`,
+    );
+    const last = its.value.reduce<(typeof its.value)[number] | null>((a, b) => (!a || b.id > a.id ? b : a), null);
+    if (!last) return { iteration: 0, sourceCommit: null, targetCommit: null, changes: [] };
+    const changes: Array<{ path: string; changeType: string; originalPath: string | null }> = [];
+    for (let skip = 0; skip < 5000; skip += 1000) {
+      const page = await this.request<{ changeEntries?: Array<{ changeType?: string; item?: { path?: string; isFolder?: boolean; gitObjectType?: string }; originalPath?: string }> }>(
+        `${prPath}/iterations/${last.id}/changes?$compareTo=0&$top=1000&$skip=${skip}&api-version=${ADO_API_VERSION}`,
+      );
+      const entries = page.changeEntries ?? [];
+      for (const e of entries) {
+        if (!e.item?.path || e.item.isFolder || e.item.gitObjectType === "tree") continue;
+        changes.push({ path: e.item.path, changeType: e.changeType ?? "edit", originalPath: e.originalPath ?? null });
+      }
+      if (entries.length < 1000) break;
+    }
+    // The merge base is what the change is compared with; the target's tip only if ADO gives no base.
+    return {
+      iteration: last.id,
+      sourceCommit: last.sourceRefCommit?.commitId ?? null,
+      targetCommit: last.commonRefCommit?.commitId ?? last.targetRefCommit?.commitId ?? null,
+      changes,
+    };
+  }
+
+  /** Work item ids for a WIQL query (read-only), at most `top`. */
+  async queryWorkItemIds(query: string, top: number): Promise<number[]> {
+    const res = await this.request<{ workItems: Array<{ id: number }> }>(`/_apis/wit/wiql?$top=${top}&api-version=${ADO_API_VERSION}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    return res.workItems.map((w) => w.id);
+  }
+
   /** Browser link for a pull request; `repository` may be the repository's name or id. */
   pullRequestWebUrl(repository: string, pullRequestId: number): string {
     return `${this.base}/_git/${encodeURIComponent(repository)}/pullrequest/${pullRequestId}`;

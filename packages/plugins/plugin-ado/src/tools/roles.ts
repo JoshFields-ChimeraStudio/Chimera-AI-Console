@@ -13,7 +13,8 @@ export interface RolePolicy {
 }
 
 const T = TOOL_NAMES;
-const READ: readonly AdoToolName[] = [T.getWorkItem, T.getWorkflow, T.getPullRequestThreads];
+/** Reading: work items, the rules, pull requests and repository files (A8: no ADO MCP needed to read). */
+const READ: readonly AdoToolName[] = [T.getWorkItem, T.getWorkflow, T.getPullRequestThreads, T.getPullRequestChanges, T.getFile, T.searchWorkItems];
 /** Everyone but readonly may assign, within the workflow's assignment rules, and comment on pull requests. */
 const REVIEW: readonly AdoToolName[] = [...READ, T.addComment, T.setState, T.assign, T.postPullRequestComment];
 const BUILD: readonly AdoToolName[] = [...REVIEW, T.linkPullRequest, T.createPullRequest];

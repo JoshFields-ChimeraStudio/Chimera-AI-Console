@@ -3,15 +3,19 @@ import { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections, conne
 import { addCents, monthlySubscriptionCents, type SubscriptionCostReport, type SubscriptionPrice, type SubscriptionUsage } from "@paperclipai/shared";
 import { withAccountingReadSnapshot } from "./accounting-transaction.js";
 import { ordinaryInputTokens } from "./costs.js";
+import { apiEstimateCentsSql, apiEstimateSpendCentsSql, SUBSCRIPTION_INCLUDED } from "./api-estimate.js";
 import { resolveCostDateRange, type CostDateRange } from "./cost-date-range.js";
 import { canEditSubscription, canonicalSubscriptionId, type SubscriptionActor } from "./subscriptions.js";
 
 export function emptySubscriptionUsage(): SubscriptionUsage {
-  return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costCents: "0.0000000", eventCount: 0, estimatedEventCount: 0, unpricedEventCount: 0 };
+  return { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, costCents: "0.0000000", eventCount: 0, estimatedEventCount: 0, unpricedEventCount: 0,
+    apiEstimateCents: "0.0000000", unratedEventCount: 0 };
 }
 
 function addUsage(target: SubscriptionUsage, source: SubscriptionUsage) {
   target.costCents = addCents(target.costCents, source.costCents);
+  target.apiEstimateCents = addCents(target.apiEstimateCents ?? 0, source.apiEstimateCents ?? 0);
+  target.unratedEventCount = (target.unratedEventCount ?? 0) + Number(source.unratedEventCount ?? 0);
   for (const key of ["inputTokens", "cachedInputTokens", "outputTokens", "eventCount", "estimatedEventCount", "unpricedEventCount"] as const) target[key] += Number(source[key]);
 }
 
@@ -65,6 +69,8 @@ export async function subscriptionCostReport(db: Db, companyId: string, actor: S
         eventCount: sql<number>`count(*)::int`,
         estimatedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'estimated')::int`,
         unpricedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'unpriced' and ${costEvents.billingType} <> 'subscription_included')::int`,
+        apiEstimateCents: sql<string>`round(coalesce(sum(${apiEstimateSpendCentsSql()}), 0), 7)::text`,
+        unratedEventCount: sql<number>`count(*) filter (where ${costEvents.billingType} = ${SUBSCRIPTION_INCLUDED} and ${apiEstimateCentsSql()} is null)::int`,
       }).from(costEvents).leftJoin(agents, and(eq(agents.id, costEvents.agentId), eq(agents.companyId, companyId)))
         .where(and(...conditions)).groupBy(costEvents.subscriptionId, costEvents.billingType, costEvents.agentId, agents.name),
     ]);

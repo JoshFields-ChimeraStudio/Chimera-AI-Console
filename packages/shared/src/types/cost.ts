@@ -121,6 +121,8 @@ export interface CostByAgent {
   estimatedEventCount: number;
   costCents: number;
   costCentsExact?: string;
+  /** Chimera fork (D9): this usage at API list prices; subscription-included usage is priced from api-rate-card.ts. */
+  apiEstimateCents?: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
@@ -185,6 +187,8 @@ export interface CostByAgentModel {
   estimatedEventCount: number;
   costCents: number;
   costCentsExact?: string;
+  /** Chimera fork (D9): this usage at API list prices; subscription-included usage is priced from api-rate-card.ts. */
+  apiEstimateCents?: number;
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;

@@ -19,6 +19,7 @@ import type {
   FinanceEvent,
   QuotaWindow,
   ProviderQuotaResult,
+  SubscriptionCostReport,
 } from "@paperclipai/shared";
 import { ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, Coins, DollarSign, ReceiptText } from "lucide-react";
 import { budgetsApi } from "../api/budgets";
@@ -26,7 +27,7 @@ import { costsApi } from "../api/costs";
 import { agentsApi } from "../api/agents";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
-import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { apiEstimateBudgetPlaceholder, BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
 import { FinanceKindCard } from "../components/FinanceKindCard";
@@ -170,13 +171,34 @@ function FinanceSummaryCard({
   );
 }
 
+/** Chimera fork (D9): the same usage at API list prices, when it differs from the billed cost. */
+function ApiEstimateLine({ costCents, apiEstimateCents }: { costCents: number; apiEstimateCents?: number }) {
+  if (apiEstimateCents === undefined || Math.abs(apiEstimateCents - costCents) < 0.5) return null;
+  return <div className="text-xs text-muted-foreground">≈ {formatCents(apiEstimateCents)} at API prices</div>;
+}
+
+/** Chimera fork (D9): what subscription usage would have cost on the API, next to the monthly fees. */
+function SubscriptionApiEstimate({ report }: { report: SubscriptionCostReport }) {
+  const usage = report.subscription;
+  if (usage.eventCount === 0 || usage.apiEstimateCents === undefined) return null;
+  const fees = report.monthlyTotals.find((row) => row.currency === "USD");
+  return (
+    <p className="text-sm text-muted-foreground">
+      At API prices, subscription usage in this period would have cost about {formatCents(Number(usage.apiEstimateCents))}
+      {fees ? ` (monthly fees: ${formatCents(Number(fees.amountCents))})` : ""}.
+      {(usage.unratedEventCount ?? 0) > 0 ? ` ${usage.unratedEventCount} events on models with no API price are not included.` : ""}
+      {" "}This is an estimate from the API rate card, not an invoice.
+    </p>
+  );
+}
+
 export function Costs({
   embedded = false,
   initialTab = "overview",
   lockTab = false,
   hideBudgetsTab = false,
 }: CostsProps = {}) {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
 
@@ -596,6 +618,12 @@ export function Costs({
     agent: budgetPolicies.filter((policy) => policy.scopeType === "agent"),
     project: budgetPolicies.filter((policy) => policy.scopeType === "project"),
   }), [budgetPolicies]);
+  // Chimera fork (D9): offer an organization budget on the API-price estimate until one is saved.
+  const companyEstimatePlaceholder = selectedCompanyId && budgetData
+    && !budgetPolicies.some((policy) => policy.scopeType === "company" && policy.metric === "api_estimate_cents")
+    ? apiEstimateBudgetPlaceholder({ companyId: selectedCompanyId, scopeType: "company", scopeId: selectedCompanyId,
+      scopeName: selectedCompany?.name ?? "Organization", windowKind: "calendar_month_utc" })
+    : null;
 
   if (!selectedCompanyId) {
     return <EmptyState icon={DollarSign} message="Select an organization to view costs." />;
@@ -708,6 +736,7 @@ export function Costs({
               icon={ArrowUpRight}
             />
           </div>
+          {subscriptions && <SubscriptionApiEstimate report={subscriptions} />}
           {subscriptions && Number(subscriptions.subscription.costCents) > 0 && <p className="text-sm text-muted-foreground">Subscription accounts also have {formatCents(Number(subscriptions.subscription.costCents))} in recorded usage charges for this period, separate from monthly fees.</p>}
           {subscriptions && subscriptions.unknown.eventCount > 0 && <p className="text-sm text-muted-foreground">Other billing usage: {formatTokens(subscriptions.unknown.inputTokens + subscriptions.unknown.cachedInputTokens + subscriptions.unknown.outputTokens)} tokens{Number(subscriptions.unknown.costCents) > 0 ? ` · ${formatCents(Number(subscriptions.unknown.costCents))} in recorded charges` : ""}, included in the inference ledger.</p>}
           {subscriptionError && subscriptions && <p role="status" className="text-sm text-muted-foreground">Showing the last loaded API and subscription usage. Updates will resume automatically.</p>}
@@ -799,6 +828,7 @@ export function Costs({
                                   <div className="text-xs text-muted-foreground">
                                     in {formatTokens(row.inputTokens + row.cachedInputTokens)} ({formatTokens(row.cachedInputTokens)} cached) · out {formatTokens(row.outputTokens)}
                                   </div>
+                                  <ApiEstimateLine costCents={row.costCents} apiEstimateCents={row.apiEstimateCents} />
                                   {(row.apiRunCount > 0 || row.subscriptionRunCount > 0) ? (
                                     <div className="text-xs text-muted-foreground">
                                       {"runs: "}
@@ -841,6 +871,7 @@ export function Costs({
                                           <div className="text-muted-foreground">
                                             {formatTokens(modelRow.inputTokens + modelRow.cachedInputTokens + modelRow.outputTokens)} tok
                                           </div>
+                                          <ApiEstimateLine costCents={modelRow.costCents} apiEstimateCents={modelRow.apiEstimateCents} />
                                         </div>
                                       </div>
                                     );
@@ -1009,9 +1040,9 @@ export function Costs({
                       <div className="grid gap-4 xl:grid-cols-2">
                         {rows.map((summary) => (
                           <BudgetPolicyCard
-                            key={summary.policyId}
+                            key={summary.policyId || `${summary.scopeType}:${summary.metric}`}
                             summary={summary}
-                            onReservationChange={(reservationCents) => policyMutation.mutate({ summary, changes: { reservationCents } })}
+                            onReservationChange={summary.metric === "billed_cents" ? (reservationCents) => policyMutation.mutate({ summary, changes: { reservationCents } }) : undefined}
                             onUnpricedUsagePolicyChange={(unpricedUsagePolicy) => policyMutation.mutate({ summary, changes: { unpricedUsagePolicy } })}
                             isSaving={policyMutation.isPending}
                             onSave={(amount) =>
@@ -1022,6 +1053,24 @@ export function Costs({
                     </section>
                   );
                 })}
+
+                {companyEstimatePlaceholder ? (
+                  <section className="space-y-3">
+                    <div>
+                      <h2 className="text-lg font-semibold">Organization budget at API prices</h2>
+                      <p className="text-sm text-muted-foreground">
+                        Counts subscription usage at API list prices, so a monthly cap and its warning work even when billed cost is $0.
+                      </p>
+                    </div>
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      <BudgetPolicyCard
+                        summary={companyEstimatePlaceholder}
+                        isSaving={policyMutation.isPending}
+                        onSave={(amount) => policyMutation.mutate({ summary: companyEstimatePlaceholder, changes: { amount } })}
+                      />
+                    </div>
+                  </section>
+                ) : null}
 
                 {budgetPolicies.length === 0 ? (
                   <Card>

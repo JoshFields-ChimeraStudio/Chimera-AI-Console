@@ -51,6 +51,9 @@ import { TOOL_DECLARATIONS, TOOL_NAMES, type AdoToolName } from "./definitions.j
 import { attributedHtml, htmlToText, textToHtml } from "./html.js";
 import { ROLE_POLICIES, pruneBindings, resolveRole, roleAllows, type AdoRole, type RoleBindings, type RoleBindingStore } from "./roles.js";
 import { agentTag, hasOnlyAgentTag, withAgentTag } from "./tags.js";
+import { repositoryOf, withRepositoryTag } from "../projects/index.js";
+import { unifiedDiff } from "./diff.js";
+import { BUILDER_TAG_PREFIX, FOR_TAG_PREFIX, withTag } from "../routing/index.js";
 import { MAX_ANCESTORS, instructionsToCarry, withInstructions } from "../workflow/instructions.js";
 
 /** Work item type states change rarely; cache them briefly per company and type. */
@@ -501,6 +504,14 @@ export function registerAgentTools(
       const description = optionalText(params.description, "description");
       const acceptanceCriteria = optionalText(params.acceptanceCriteria, "acceptanceCriteria");
       const givenReproSteps = optionalText(params.reproSteps, "reproSteps");
+      const givenRepository = optionalText(params.repository, "repository");
+      const builderRole = optionalText(params.builderRole, "builderRole")?.trim() ?? null;
+      const forName = optionalText(params.forAgent, "forAgent")?.trim() ?? null;
+      const lowerType = type.trim().toLowerCase();
+      if (builderRole && lowerType !== "user story" && lowerType !== "bug") throw new ToolFailure(`Nothing was created: builderRole is only for a User Story or Bug; a ${type} has none.`);
+      if (forName && !["review", "qa test", "task"].includes(lowerType)) throw new ToolFailure(`Nothing was created: forAgent is only for a Review, QA Test or Task.`);
+      const forAgent = forName ? await findAgent(caller.run.companyId, forName).catch(() => null) : null;
+      if (forName && !forAgent) throw new ToolFailure(`Nothing was created: there is no agent called "${forName}".`);
       const assignTo = optionalText(params.assignTo, "assignTo")?.trim() ?? null;
       const { role } = caller;
       // Refuse a type the role may not create before reading anything.
@@ -557,6 +568,8 @@ export function registerAgentTools(
         const pre = decideAssignment({ ...input, parentAssigneeAgentId: parentTask?.assigneeAgentId ?? null });
         if (!pre.ok) throw new ToolFailure(`Nothing was created: ${denial(pre)}`);
       }
+      // A12: the item's repository, given or its parent's; it decides its task's Paperclip project.
+      const repository = givenRepository ? await checkedRepository(ado, givenRepository) : parent ? repositoryOf(parent.fields["System.Tags"]) : null;
       // Josh's instructions on the items above travel down to the new one (workflow/instructions.ts).
       const carried = parent ? instructionsToCarry(type, description, await ancestorsOf(ado, parent)) : [];
       const fullDescription = withInstructions(description, carried);
@@ -569,13 +582,13 @@ export function registerAgentTools(
         ...(reproSteps ? [{ op: "add" as const, path: `/fields/${REPRO_STEPS_FIELD}`, value: textToHtml(reproSteps) }] : []),
         ...(parent ? [...inherit(parent, "System.AreaPath"), ...inherit(parent, "System.IterationPath")] : []),
         { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, parentId ? `Created as a child of #${parentId}.` : "Created.") },
-        { op: "add", path: "/fields/System.Tags", value: agentTag(caller.agentName) },
+        { op: "add", path: "/fields/System.Tags", value: routingTags(repository ? withRepositoryTag(agentTag(caller.agentName), repository) : agentTag(caller.agentName), builderRole, forAgent?.name ?? null) },
         ...(parentId ? [{ op: "add" as const, path: "/relations/-", value: { rel: "System.LinkTypes.Hierarchy-Reverse", url: ado.workItemApiUrl(parentId) } }] : []),
       ];
       const created = await ado.createWorkItem(type, ops);
       const where = parentId ? ` under #${parentId}` : "";
       await audit(caller, "work_item_created", created.id, `created ${type} ADO #${created.id}${where}`, { parentId, type, title, rule: decision.rule });
-      const data: Record<string, unknown> = { workItemId: created.id, parentId, type, url: ado.webUrl(created.id) };
+      const data: Record<string, unknown> = { workItemId: created.id, parentId, type, url: ado.webUrl(created.id), repository, ...(builderRole ? { builderRole } : {}), ...(forAgent ? { forAgent: forAgent.name } : {}) };
       let content = `Created ${type} #${created.id} "${title}"${where}: ${ado.webUrl(created.id)}`;
       if (carried.length) {
         data.instructionsCopiedFrom = carried.map((c) => c.sourceId);
@@ -735,6 +748,7 @@ export function registerAgentTools(
 
     async [TOOL_NAMES.setTechnicalNotes](caller, params, ado) {
       const notes = requiredText(params.notes, "notes").trim();
+      const givenRepository = optionalText(params.repository, "repository");
       const id = await resolveWorkItemId(caller.run, params.workItemId);
       const item = await withNotFound(ado.getWorkItem(id), `Work item #${id} was not found in ADO.`);
       const type = String(item.fields["System.WorkItemType"] ?? "");
@@ -743,14 +757,115 @@ export function registerAgentTools(
       }
       const state = String(item.fields["System.State"] ?? "");
       if (FINAL_STATES.some((f) => f.toLowerCase() === state.toLowerCase())) throw new ToolFailure(`Nothing was changed: #${id} is ${state}.`);
+      const repository = givenRepository ? await checkedRepository(ado, givenRepository) : null;
+      const tags = withAgentTag(item.fields["System.Tags"], caller.agentName);
       const updated = await ado.updateWorkItem(id, [
         { op: "test", path: "/rev", value: item.rev },
         { op: "add", path: "/fields/Custom.TechnicalNotes", value: textToHtml(notes) },
-        { op: "add", path: "/fields/System.History", value: attributedHtml(caller.agentName, "Updated the technical notes.") },
-        { op: "add", path: "/fields/System.Tags", value: withAgentTag(item.fields["System.Tags"], caller.agentName) },
+        {
+          op: "add",
+          path: "/fields/System.History",
+          value: attributedHtml(caller.agentName, repository ? `Updated the technical notes (repository ${repository}).` : "Updated the technical notes."),
+        },
+        { op: "add", path: "/fields/System.Tags", value: repository ? withRepositoryTag(tags, repository) : tags },
       ]);
-      await audit(caller, "technical_notes_updated", id, `updated the technical notes of ADO #${id}`, { rev: updated.rev });
-      return { content: `Technical notes of ${type} #${id} updated.`, data: { workItemId: id, rev: updated.rev, changed: true } };
+      await audit(caller, "technical_notes_updated", id, `updated the technical notes of ADO #${id}`, { rev: updated.rev, repository });
+      const where = repository ? ` Repository set to ${repository}: tasks created for it from now on go in that repository's Paperclip project.` : "";
+      return {
+        content: `Technical notes of ${type} #${id} updated.${where}`,
+        data: { workItemId: id, rev: updated.rev, changed: true, repository: repository ?? repositoryOf(item.fields["System.Tags"]) },
+      };
+    },
+
+    async [TOOL_NAMES.getFile](_caller, params, ado) {
+      const repoName = requiredText(params.repository, "repository").trim();
+      const path = requiredText(params.path, "path").trim();
+      const commit = optionalText(params.commit, "commit")?.trim() ?? null;
+      const branch = (optionalText(params.branch, "branch")?.trim() ?? "main").replace(/^refs\/heads\//, "");
+      const startLine = params.startLine === undefined || params.startLine === null ? 1 : positiveInt(params.startLine, "startLine");
+      const repo = await withNotFound(ado.getRepository(repoName), `Repository "${repoName}" was not found in the ADO project.`);
+      const at = commit ? `commit ${commit.slice(0, 8)}` : `branch ${branch}`;
+      const item = await withNotFound(
+        ado.getRepositoryItem(repo.id, path, commit ?? branch, commit ? "commit" : "branch"),
+        `${path} was not found in ${repo.name} at ${at}.`,
+      );
+      if (item.kind === "folder") {
+        const lines = item.entries.map((e) => `${e.path}${e.isFolder ? "/" : ""}`);
+        return {
+          content: `${repo.name} ${path} at ${at} is a folder with ${lines.length} entr${lines.length === 1 ? "y" : "ies"}:\n${lines.join("\n")}`,
+          data: { repository: repo.name, path, at, folder: true, entries: item.entries },
+        };
+      }
+      if (item.content.includes("\u0000")) throw new ToolFailure(`${path} in ${repo.name} is a binary file; only text files can be read.`);
+      const all = item.content.replace(/\r\n/g, "\n").split("\n");
+      if (all.length > 1 && all[all.length - 1] === "") all.pop();
+      const from = Math.min(startLine, Math.max(all.length, 1));
+      const slice = all.slice(from - 1, from - 1 + FILE_LINES);
+      const last = from - 1 + slice.length;
+      const more = last < all.length ? `\n\n(${all.length - last} more lines: call again with startLine ${last + 1}.)` : "";
+      const numbered = slice.map((l, i) => `${String(from + i).padStart(5)}  ${l}`).join("\n");
+      return {
+        content: `${repo.name} ${path} at ${at}${item.commitId ? ` (commit ${item.commitId.slice(0, 8)})` : ""}, lines ${from}-${last} of ${all.length}:\n${numbered}${more}`,
+        data: { repository: repo.name, path, at, commitId: item.commitId, totalLines: all.length, startLine: from, endLine: last },
+      };
+    },
+
+    async [TOOL_NAMES.getPullRequestChanges](_caller, params, ado) {
+      const pr = await findPullRequest(ado, params);
+      const filePath = optionalText(params.filePath, "filePath")?.trim() ?? null;
+      const repoLabel = pr.repositoryName || pr.repositoryId;
+      const changes = await ado.getPullRequestChanges(pr.repositoryId, pr.pullRequestId);
+      const head = `Pull request ${pr.pullRequestId} "${pr.title}" (${pr.status}) in ${repoLabel}, ${pr.sourceBranch ?? "?"} into ${pr.targetBranch ?? "?"}`;
+      if (!filePath) {
+        const lines = changes.changes.map((c) => `- ${c.changeType}: ${c.path}${c.originalPath ? ` (from ${c.originalPath})` : ""}`);
+        return {
+          content: `${head}, ${lines.length} file${lines.length === 1 ? "" : "s"} changed:\n${lines.join("\n") || "(none)"}`,
+          data: { pullRequestId: pr.pullRequestId, repository: repoLabel, ...changes },
+        };
+      }
+      const wanted = ("/" + filePath.replace(/^\/+/, "")).toLowerCase();
+      const change = changes.changes.find((c) => c.path.toLowerCase() === wanted);
+      if (!change) throw new ToolFailure(`${filePath} is not among the files pull request ${pr.pullRequestId} changes; call without filePath for the list.`);
+      if (!changes.sourceCommit || !changes.targetCommit) throw new ToolFailure(`ADO did not say which commits pull request ${pr.pullRequestId} compares.`);
+      const read = async (path: string, commit: string) => {
+        try {
+          const item = await ado.getRepositoryItem(pr.repositoryId, path, commit, "commit");
+          return item.kind === "file" ? item.content : "";
+        } catch (err) {
+          if (err instanceof AdoError && err.status === 404) return "";
+          throw err;
+        }
+      };
+      const before = change.changeType.includes("add") ? "" : await read(change.originalPath ?? change.path, changes.targetCommit);
+      const after = change.changeType.includes("delete") ? "" : await read(change.path, changes.sourceCommit);
+      const diff = unifiedDiff(before, after, change.path);
+      const content =
+        diff === null
+          ? `${head}: ${change.path} (${change.changeType}) is too long to diff here (${before.split("\n").length} lines before, ${after.split("\n").length} after). Read it with ado_get_file at branch ${pr.sourceBranch ?? "?"}.`
+          : `${head}: ${change.path} (${change.changeType})\n${diff || "(no text change)"}`;
+      return { content, data: { pullRequestId: pr.pullRequestId, repository: repoLabel, path: change.path, changeType: change.changeType, diffed: diff !== null } };
+    },
+
+    async [TOOL_NAMES.searchWorkItems](_caller, params, ado) {
+      const text = requiredText(params.text, "text").trim();
+      const type = optionalText(params.type, "type")?.trim() ?? null;
+      const state = optionalText(params.state, "state")?.trim() ?? null;
+      const top = params.top === undefined ? 20 : boundedInt(params.top, "top", 1, 50);
+      const q = (v: string) => `'${v.replace(/'/g, "''")}'`;
+      const query =
+        `SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project AND [System.Title] CONTAINS ${q(text)}` +
+        (type ? ` AND [System.WorkItemType] = ${q(type)}` : "") +
+        (state ? ` AND [System.State] = ${q(state)}` : "") +
+        ` ORDER BY [System.ChangedDate] DESC`;
+      const ids = await ado.queryWorkItemIds(query, top);
+      const items = ids.length ? await ado.getWorkItemSummaries(ids) : [];
+      const byId = new Map(items.map((i) => [i.id, i]));
+      const found = ids.map((id) => byId.get(id)).filter((i): i is NonNullable<typeof i> => !!i);
+      const lines = found.map((i) => `- #${i.id} ${i.type} (${i.state}): ${i.title}${i.parentId ? `, under #${i.parentId}` : ""}`);
+      return {
+        content: found.length ? `${found.length} work item${found.length === 1 ? "" : "s"} with "${text}" in the title:\n${lines.join("\n")}` : `No work item has "${text}" in its title.`,
+        data: { items: found.map((i) => ({ id: i.id, type: i.type, state: i.state, title: i.title, parentId: i.parentId, url: i.webUrl })) },
+      };
     },
 
     async [TOOL_NAMES.getWorkflow](caller) {
@@ -858,6 +973,29 @@ function assignedMeta(target: Agent, result: AssignDetails): Record<string, unkn
 /** Types that have Custom.TechnicalNotes in the Chimera process. */
 const TECHNICAL_NOTES_TYPES = new Set(["epic", "feature", "user story", "bug", "task"]);
 
+/** A6: the builder:<role> and for:<agent> tags the router assigns by. */
+function routingTags(tags: string, builderRole: string | null, forAgent: string | null): string {
+  let out = tags;
+  if (builderRole) out = withTag(out, BUILDER_TAG_PREFIX, builderRole);
+  if (forAgent) out = withTag(out, FOR_TAG_PREFIX, forAgent);
+  return out;
+}
+
+/** Lines ado_get_file returns at a time. */
+const FILE_LINES = 2000;
+
+/** The repository's name as ADO has it, or a refusal naming the ones that exist. */
+async function checkedRepository(ado: AdoClient, name: string): Promise<string> {
+  try {
+    return (await ado.getRepository(name.trim())).name;
+  } catch (err) {
+    if (err instanceof AdoError && err.status === 404) {
+      throw new ToolFailure(`Nothing was changed: there is no repository "${name.trim()}" in this ADO project.`);
+    }
+    throw err;
+  }
+}
+
 /** The parent and the items above it, nearest first (at most MAX_ANCESTORS; a missing one ends the walk). */
 async function ancestorsOf(ado: AdoClient, parent: AdoWorkItem): Promise<AdoWorkItem[]> {
   const out = [parent];
@@ -929,7 +1067,8 @@ export function parentIdOf(item: AdoWorkItem): number | null {
   return rel ? idFromUrl(rel.url) : null;
 }
 
-function idFromUrl(url: string): number | null {
+/** A work item id from its API URL (a relation url). */
+export function idFromUrl(url: string): number | null {
   const m = url.match(/\/workItems\/(\d+)$/i);
   return m ? Number(m[1]) : null;
 }

@@ -16,6 +16,7 @@ import type { Issue } from "@paperclipai/plugin-sdk";
 import { AdoError, summarize, type AdoClient, type AdoWorkItem, type WorkItemSummary } from "../ado/client.js";
 import type { PluginDeps } from "../deps.js";
 import type { LinkFeatures } from "../links/index.js";
+import type { ProjectRouter } from "../projects/index.js";
 import { BacklogError } from "./errors.js";
 import { buildTaskDescription } from "./description.js";
 import { notifyBacklogChanged } from "./notify.js";
@@ -56,6 +57,8 @@ export interface AssignDetails extends AssignResult {
   /** Where a new task was placed. */
   parentIssueId: string | null;
   projectId: string | null;
+  /** The repository the item names (A12), when it names one. */
+  repository?: string | null;
   /** Set when the note could not be posted (the assignment stands). */
   noteError?: string;
 }
@@ -105,6 +108,8 @@ export interface AssignerOptions {
   repo: WorkItemCacheRepository;
   projectKey(companyId: string): Promise<ProjectKey | null>;
   processWorkItem(companyId: string, item: WorkItemSummary, source: string): Promise<void>;
+  /** A12: picks the Paperclip project of a new task from the item's repository. */
+  projects?: ProjectRouter;
 }
 
 function errorText(err: unknown): string {
@@ -225,7 +230,14 @@ export function createAssigner(options: AssignerOptions): Assigner {
       const origin = await links.originFor(companyId, workItemId);
       if (!origin) throw new BacklogError("The Azure DevOps plugin is not configured for this company");
       const parent = await parentTask().catch(() => null);
-      const projectId = parent ? (parent.projectId ?? null) : ((await request.fallbackProjectId?.()) ?? null);
+      // A12: the project of the item's repository first; otherwise the parent task's, as before.
+      const choice = options.projects
+        ? await options.projects.choose(companyId, await client(), item).catch((err) => {
+            ctx.logger.warn("Could not choose a project from the work item's repository", { companyId, workItemId, error: errorText(err) });
+            return null;
+          })
+        : null;
+      const projectId = choice?.projectId ?? (parent ? (parent.projectId ?? null) : ((await request.fallbackProjectId?.()) ?? null));
       const created = await ctx.issues.create({
         companyId,
         title: summary.title || `ADO #${workItemId}`,
@@ -238,9 +250,18 @@ export function createAssigner(options: AssignerOptions): Assigner {
         originId: origin.originId,
         actor,
       });
-      const placed = { parentIssueId: parent?.id ?? null, projectId };
+      const placed = { parentIssueId: parent?.id ?? null, projectId, repository: choice?.repository ?? null };
       const done = async (issue: Issue): Promise<AssignDetails> => {
         await writeHolder(issue, request, claimed);
+        if (choice?.repository && !choice.projectId) {
+          await ctx.issues
+            .createComment(
+              issue.id,
+              `ADO #${workItemId} works in the repository **${choice.repository}**, but no Paperclip project has a workspace on it (or is named after it), so this task stays in its parent's project. Add a project with a workspace on ${choice.repository} so its tasks get that repository's worktree.`,
+              companyId,
+            )
+            .catch(() => undefined);
+        }
         const noteError = await postNote(companyId, issue, request);
         await wake(companyId, issue, request);
         return {

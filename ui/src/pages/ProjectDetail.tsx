@@ -616,7 +616,7 @@ export function ProjectDetail() {
 
   const projectBudgetSummary = useMemo(() => {
     const matched = budgetOverview?.policies.find(
-      (policy) => policy.scopeType === "project" && policy.scopeId === (project?.id ?? routeProjectRef),
+      (policy) => policy.scopeType === "project" && policy.scopeId === (project?.id ?? routeProjectRef) && policy.metric === "billed_cents",
     );
     if (matched) return matched;
     return {

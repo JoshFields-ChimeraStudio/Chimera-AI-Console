@@ -2,14 +2,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AgentDetail as AgentDetailRecord, BudgetOverview, BudgetPolicySummary } from "@paperclipai/shared";
 import { budgetsApi } from "../api/budgets";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
-import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { apiEstimateBudgetPlaceholder, BudgetPolicyCard } from "../components/BudgetPolicyCard";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { queryKeys } from "../lib/queryKeys";
 
 type BudgetAgent = Pick<AgentDetailRecord, "id" | "name" | "status" | "pauseReason" | "budgetMonthlyCents" | "spentMonthlyCents">;
 
 export function agentBudgetSummary(overview: BudgetOverview | undefined, agent: BudgetAgent, companyId: string): BudgetPolicySummary {
-  const matched = overview?.policies.find((policy) => policy.scopeType === "agent" && policy.scopeId === agent.id);
+  const matched = overview?.policies.find((policy) => policy.scopeType === "agent" && policy.scopeId === agent.id && policy.metric === "billed_cents");
   if (matched) return matched;
   const amount = agent.budgetMonthlyCents ?? 0;
   const observed = agent.spentMonthlyCents ?? 0;
@@ -49,6 +49,10 @@ export function AgentBudgetsPanel({ agent, companyId }: { agent: BudgetAgent; co
     staleTime: 5_000,
   });
   const summary = agentBudgetSummary(overview.data, agent, companyId);
+  // Chimera fork (D9): a second budget on the API-price estimate, for agents on a subscription.
+  const estimate = overview.data?.policies.find((policy) => policy.scopeType === "agent" && policy.scopeId === agent.id
+    && policy.metric === "api_estimate_cents") ?? apiEstimateBudgetPlaceholder({ companyId, scopeType: "agent", scopeId: agent.id,
+      scopeName: agent.name, windowKind: "calendar_month_utc" });
   const incidents = (overview.data?.activeIncidents ?? []).filter(
     (incident) => incident.scopeType === "agent" && incident.scopeId === agent.id,
   );
@@ -58,12 +62,12 @@ export function AgentBudgetsPanel({ agent, companyId }: { agent: BudgetAgent; co
     queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
   };
   const policy = useMutation({
-    mutationFn: (changes: { amount?: number; reservationCents?: string; unpricedUsagePolicy?: "block" | "allow" }) =>
+    mutationFn: ({ target, ...changes }: { target: BudgetPolicySummary; amount?: number; reservationCents?: string; unpricedUsagePolicy?: "block" | "allow" }) =>
       budgetsApi.upsertPolicy(companyId, {
         scopeType: "agent",
         scopeId: agent.id,
-        metric: summary.metric,
-        windowKind: summary.windowKind,
+        metric: target.metric,
+        windowKind: target.windowKind,
         ...changes,
       }),
     onSuccess: invalidate,
@@ -102,9 +106,15 @@ export function AgentBudgetsPanel({ agent, companyId }: { agent: BudgetAgent; co
       <BudgetPolicyCard
         summary={summary}
         isSaving={policy.isPending}
-        onSave={(amount) => policy.mutate({ amount })}
-        onReservationChange={(reservationCents) => policy.mutate({ reservationCents })}
-        onUnpricedUsagePolicyChange={(unpricedUsagePolicy) => policy.mutate({ unpricedUsagePolicy })}
+        onSave={(amount) => policy.mutate({ target: summary, amount })}
+        onReservationChange={(reservationCents) => policy.mutate({ target: summary, reservationCents })}
+        onUnpricedUsagePolicyChange={(unpricedUsagePolicy) => policy.mutate({ target: summary, unpricedUsagePolicy })}
+      />
+      <BudgetPolicyCard
+        summary={estimate}
+        isSaving={policy.isPending}
+        onSave={(amount) => policy.mutate({ target: estimate, amount })}
+        onUnpricedUsagePolicyChange={(unpricedUsagePolicy) => policy.mutate({ target: estimate, unpricedUsagePolicy })}
       />
     </div>
   );

@@ -395,6 +395,36 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     expect(routineRow!.originKind).toBe("routine_execution");
   });
 
+  it("lets a plugin set only the model of a task's adapter overrides (fork patch 17)", async () => {
+    const { companyId } = await seedCompanyAndAgent();
+    const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
+    const issueId = randomUUID();
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Story",
+      status: "todo",
+      priority: "medium",
+      identifier: `${issuePrefix(companyId)}-escalate`,
+      assigneeAdapterOverrides: { adapterConfig: { effort: "high" }, useProjectWorkspace: true },
+    });
+    const updated = await services.issues.update({
+      issueId,
+      companyId,
+      patch: { assigneeAdapterOverrides: { adapterConfig: { model: "claude-opus-5-5" } } },
+    });
+    // The task's other overrides are kept.
+    expect(updated.assigneeAdapterOverrides).toEqual({ adapterConfig: { effort: "high", model: "claude-opus-5-5" }, useProjectWorkspace: true });
+    for (const patch of [
+      { assigneeAdapterOverrides: { adapterConfig: { model: "x", command: "rm" } } },
+      { assigneeAdapterOverrides: { adapterConfig: { model: "x" }, useProjectWorkspace: false } },
+      { assigneeAdapterOverrides: { adapterConfig: { model: "bad model; rm" } } },
+      { assigneeAdapterOverrides: null },
+    ]) {
+      await expect(services.issues.update({ issueId, companyId, patch })).rejects.toThrow("Plugin may only set assigneeAdapterOverrides.adapterConfig.model");
+    }
+  });
+
   it("creates plugin operation issues with the generic operation origin", async () => {
     const { companyId } = await seedCompanyAndAgent();
     const services = buildHostServices(db, "plugin-record-id", "paperclip.missions", createEventBusStub());
@@ -860,6 +890,8 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       inputTokens: 30,
       cachedInputTokens: 3,
       outputTokens: 6,
+      // Fork patch 17: not a subscription, so the API estimate is the billed cost.
+      apiEstimateCents: 300,
     });
     // Fork patch 16: the same totals by agent, model and billing type.
     expect(summary.costs.breakdown).toEqual([
@@ -873,6 +905,7 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
         inputTokens: 30,
         cachedInputTokens: 3,
         outputTokens: 6,
+        apiEstimateCents: 300,
       },
     ]);
   });

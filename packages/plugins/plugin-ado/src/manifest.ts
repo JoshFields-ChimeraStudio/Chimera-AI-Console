@@ -35,6 +35,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "activity.log.write",
     "issues.read",
     "issues.orchestration.read",
+    "projects.read",
     "issues.update",
     "issues.create",
     "issues.wakeup",
@@ -93,6 +94,32 @@ const manifest: PaperclipPluginManifestV1 = {
         title: "Smoke-test agent",
         description:
           "The agent the smoke-test Epic is assigned to (the test team's planner, for example Rowan). Leave empty to turn the smoke-test widget's buttons off, for example on the real team's project.",
+      },
+      builderRoutes: {
+        type: "array",
+        title: "Builder routes (automatic assignment)",
+        description:
+          "Which agents build which kind of Story, and how many open Stories and Bugs each may hold. When Josh sets a Feature Ready For Work, the plugin assigns " +
+          "its Stories tagged builder:<role> (by the planner) to the agent of that role holding the fewest, up to the limit, and the Reviews, QA Tests and Tasks " +
+          "tagged for:<agent> to that agent; a Story waits for a free builder or for the items it depends on. Leave empty to have the director assign everything.",
+        items: {
+          type: "object",
+          properties: {
+            role: { type: "string", title: "Builder role", description: "As the planner tags Stories, for example backend, web, infra" },
+            agents: { type: "string", title: "Agents", description: "Agent names, comma-separated, first preferred on a tie, for example Ouroboros, Hydra" },
+            wipLimit: { type: "integer", title: "Open Stories per agent", minimum: 1, default: 1 },
+          },
+          required: ["role", "agents"],
+        },
+        default: [],
+      },
+      escalationModel: {
+        type: "string",
+        title: "Escalation model",
+        description:
+          "When a Story or Bug reaches its last round of review changes, or its QA Tests have failed twice, its builder's later turns on that Story run on this model " +
+          "(for example claude-opus-5-5). Other tasks and agents keep their model. Leave empty to turn this off.",
+        default: "claude-opus-5-5",
       },
       agentRoles: {
         type: "array",

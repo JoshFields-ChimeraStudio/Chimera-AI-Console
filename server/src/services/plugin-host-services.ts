@@ -86,6 +86,7 @@ import { isIP } from "node:net";
 import { logger } from "../middleware/logger.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
+import { apiEstimateCentsSql, apiEstimateSpendCentsSql, SUBSCRIPTION_INCLUDED } from "./api-estimate.js";
 import {
   authorizationService,
   canActorReadIssuePrivacy,
@@ -1394,6 +1395,7 @@ export function buildHostServices(
         inputTokens: 0,
         cachedInputTokens: 0,
         outputTokens: 0,
+        apiEstimateCents: 0,
         billingCode: billingCode ?? null,
         breakdown: [],
       };
@@ -1405,11 +1407,13 @@ export function buildHostServices(
         inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::double precision`,
         cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::double precision`,
         outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::double precision`,
+        apiEstimateCents: sql<number>`coalesce(sum(${apiEstimateSpendCentsSql()}), 0)::double precision`,
       })
       .from(costEvents)
       .where(and(eq(costEvents.companyId, companyId), scopeCondition));
     // Fork patch 16: the same totals by agent, model and billing type, so a plugin can price
-    // subscription usage per model (the ADO plugin's cost per Feature, BACKLOG D9).
+    // subscription usage per model (the ADO plugin's cost per Feature, BACKLOG D9). Patch 17 adds
+    // apiEstimateCents from the shared rate card, so plugins keep no rate card of their own.
     const breakdownRows = await db
       .select({
         agentId: costEvents.agentId,
@@ -1421,6 +1425,10 @@ export function buildHostServices(
         inputTokens: sql<number>`coalesce(sum(${costEvents.inputTokens}), 0)::double precision`,
         cachedInputTokens: sql<number>`coalesce(sum(${costEvents.cachedInputTokens}), 0)::double precision`,
         outputTokens: sql<number>`coalesce(sum(${costEvents.outputTokens}), 0)::double precision`,
+        // Null when subscription-included usage is on a model the rate card has no price for.
+        apiEstimateCents: sql<number | null>`case when ${costEvents.billingType} = ${SUBSCRIPTION_INCLUDED}
+          and bool_and(${apiEstimateCentsSql()} is null) then null
+          else coalesce(sum(${apiEstimateSpendCentsSql()}), 0)::double precision end`,
       })
       .from(costEvents)
       .where(and(eq(costEvents.companyId, companyId), scopeCondition))
@@ -1431,6 +1439,7 @@ export function buildHostServices(
       inputTokens: Number(row?.inputTokens ?? 0),
       cachedInputTokens: Number(row?.cachedInputTokens ?? 0),
       outputTokens: Number(row?.outputTokens ?? 0),
+      apiEstimateCents: Number(row?.apiEstimateCents ?? 0),
       billingCode: billingCode ?? null,
       breakdown: breakdownRows.map((r) => ({
         agentId: r.agentId ?? null,
@@ -1442,6 +1451,7 @@ export function buildHostServices(
         inputTokens: Number(r.inputTokens ?? 0),
         cachedInputTokens: Number(r.cachedInputTokens ?? 0),
         outputTokens: Number(r.outputTokens ?? 0),
+        apiEstimateCents: r.apiEstimateCents == null ? null : Number(r.apiEstimateCents),
       })),
     };
   };
@@ -2261,6 +2271,22 @@ export function buildHostServices(
               throw new Error(`Plugin may only change the originKind of manual tasks or tasks under ${defaultPluginOriginKind}`);
             }
           }
+        }
+        if (patch.assigneeAdapterOverrides !== undefined) {
+          // Fork patch 17 (Chimera, BACKLOG D9): a plugin may set the model the assignee runs on for
+          // this task (the ADO plugin's model escalation), and nothing else of the adapter config.
+          // The task's other overrides are kept.
+          const requested = patch.assigneeAdapterOverrides as { adapterConfig?: Record<string, unknown> } | null;
+          const keys = requested && typeof requested === "object" ? Object.keys(requested) : [];
+          const config = requested?.adapterConfig;
+          const configKeys = config && typeof config === "object" ? Object.keys(config) : [];
+          const model = config?.model;
+          if (!requested || keys.some((key) => key !== "adapterConfig")
+            || configKeys.some((key) => key !== "model") || typeof model !== "string" || !/^[\w.@:/-]{1,120}$/.test(model)) {
+            throw new Error("Plugin may only set assigneeAdapterOverrides.adapterConfig.model");
+          }
+          const current = (existing.assigneeAdapterOverrides ?? {}) as { adapterConfig?: Record<string, unknown> };
+          patch.assigneeAdapterOverrides = { ...current, adapterConfig: { ...(current.adapterConfig ?? {}), model } };
         }
         const parentDepthPolicy = patch.parentId ? await pluginParentDepthPolicy() : undefined;
         const updated = (await issues.update(params.issueId, {

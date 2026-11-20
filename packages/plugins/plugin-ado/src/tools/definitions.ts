@@ -16,6 +16,9 @@ export const TOOL_NAMES = {
   getPullRequestThreads: "ado_get_pr_threads",
   postPullRequestComment: "ado_post_pr_comment",
   setTechnicalNotes: "ado_update_technical_notes",
+  getFile: "ado_get_file",
+  getPullRequestChanges: "ado_get_pr_changes",
+  searchWorkItems: "ado_search_work_items",
   getWorkflow: "ado_get_workflow",
 } as const;
 
@@ -153,6 +156,28 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
           description:
             "Steps to reproduce, as plain text: the steps, the expected and the actual result. Only for a Defect or a Bug, where ADO requires it; if you leave it out, the description is used.",
         },
+        repository: {
+          type: "string",
+          minLength: 1,
+          maxLength: 200,
+          description:
+            "The ADO Git repository the work is done in (for example Products, or Grimoire for documents). Tags the item repo:<name>; items created under it get the same tag, and their Paperclip tasks go in the project with a workspace on that repository. Left out: the item takes its parent's.",
+        },
+        builderRole: {
+          type: "string",
+          minLength: 1,
+          maxLength: 100,
+          description:
+            "For a User Story or Bug: the kind of builder it needs, as the plugin's builder routes name them (for example backend, web, infra). Tags it builder:<role>; " +
+            "after Josh's approval the plugin assigns it to a builder of that role with room. Put any \"Depends on #<id>\" in the description.",
+        },
+        forAgent: {
+          type: "string",
+          minLength: 1,
+          maxLength: 100,
+          description:
+            "For a Review, QA Test or Task: the agent it is for (for example Ladon). Tags it for:<name>; after Josh's approval the plugin assigns it to that agent. Not an assignment now.",
+        },
         assignTo: { type: "string", minLength: 1, description: "Optional: name of the agent to assign the new item to." },
       },
       required: ["type", "title"],
@@ -260,8 +285,69 @@ export const TOOL_DECLARATIONS: PluginToolDeclaration[] = [
       properties: {
         workItemId,
         notes: { type: "string", minLength: 1, maxLength: 30000, description: "The technical notes, as plain text." },
+        repository: {
+          type: "string",
+          minLength: 1,
+          maxLength: 200,
+          description:
+            "The ADO Git repository the work is done in (for example Products, or Grimoire for documents). Tags the item repo:<name>; items created under it get the same tag, and their Paperclip tasks go in the project with a workspace on that repository. Left out: the item keeps the repository it has.",
+        },
       },
       required: ["notes"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_NAMES.getFile,
+    displayName: "ADO: get repository file",
+    description:
+      "Read a file, or list a folder, in an ADO Git repository at a branch (main by default) or a commit: for example a document in Grimoire " +
+      "or a file on a pull request's branch. Files come back as text with line numbers, up to 2000 lines at a time (use startLine for more).",
+    parametersSchema: {
+      type: "object",
+      properties: {
+        repository,
+        path: { type: "string", minLength: 1, maxLength: 1000, description: "Path in the repository, for example /docs/prd.md or docs/ (a folder)." },
+        branch: { type: "string", minLength: 1, maxLength: 250, description: "Branch name, for example main or ai/812-readme. Default main." },
+        commit: { type: "string", pattern: "^[0-9a-fA-F]{40}$", description: "A full commit id; read the file at that commit instead of a branch." },
+        startLine: { type: "integer", minimum: 1, description: "First line to return (default 1)." },
+      },
+      required: ["repository", "path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_NAMES.getPullRequestChanges,
+    displayName: "ADO: get pull request changes",
+    description:
+      "See what a pull request changes. Without filePath: the files it adds, edits, renames or deletes, and the commits compared. " +
+      "With filePath: that file's diff (unified, against the merge base), or both versions' sizes if it is too long to diff.",
+    parametersSchema: {
+      type: "object",
+      properties: {
+        repository: { ...repository, description: "Optional repository name or ID; the pull request is found in the project without it." },
+        pullRequestId,
+        filePath: { type: "string", minLength: 1, maxLength: 1000, description: "A changed file's path as the list gives it, for example /src/app.ts." },
+      },
+      required: ["pullRequestId"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: TOOL_NAMES.searchWorkItems,
+    displayName: "ADO: search work items",
+    description:
+      "Find work items in the project whose title contains some text, optionally of one type or state, newest change first: for example to check " +
+      "whether a Feature or Story already exists before creating it. Gives ID, type, state, title and parent; read one with ado_get_work_item.",
+    parametersSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", minLength: 2, maxLength: 200, description: "Text the title contains (not case-sensitive)." },
+        type: { type: "string", minLength: 1, maxLength: 100, description: "Only this work item type, for example User Story." },
+        state: { type: "string", minLength: 1, maxLength: 100, description: "Only this state, for example New." },
+        top: { type: "integer", minimum: 1, maximum: 50, default: 20, description: "At most this many results (default 20)." },
+      },
+      required: ["text"],
       additionalProperties: false,
     },
   },

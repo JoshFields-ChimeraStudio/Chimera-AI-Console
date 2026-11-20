@@ -3,8 +3,9 @@
  *
  * The cost is everything Paperclip recorded for the item's linked task and every task under it
  * (Stories, Reviews, QA Tests, Defects, Documents...), split by agent and model (fork patch 16).
- * On the subscription the billed cost is $0, so the report also prices the same tokens at the
- * API rate card below: an estimate to judge whether the API or the subscription is cheaper.
+ * On the subscription the billed cost is $0, so the report also gives the server's API-price estimate
+ * (fork patch 17, packages/shared/src/api-rate-card.ts): a guide to whether the API or the
+ * subscription is cheaper.
  *
  * Costs are recorded when a run finishes, after its status, and the run that completed the last
  * Story is often still going when the Feature completes. So the report waits until no run under
@@ -19,35 +20,6 @@ import { PLUGIN_SIGNATURE } from "../workflow/rules.js";
 
 /** The types that get a cost report when they complete. */
 export const COST_REPORT_TYPES = ["feature", "epic"];
-
-/**
- * API list prices in USD per million tokens: [input, cache read, output]. Standard global API pricing,
- * checked 20 November 2026 against https://platform.claude.com/docs/en/about-claude/pricing and its
- * reporting (Sonnet 5.5 cache reads $0.10 since Haiku 5.5 shipped). Update here when prices change.
- * Uncached input includes cache writes, which the API bills at 1.25x (5-minute) or 2x (1-hour) input:
- * they are priced as plain input, so the input part of an estimate can be low by up to that much.
- */
-export const API_RATES: Record<string, readonly [number, number, number]> = {
-  "claude-fable-5-2": [10, 1, 50], // assumed the same as Fable 5.1
-  "claude-fable-5-1": [10, 1, 50],
-  "claude-mythos-5": [10, 1, 50],
-  "claude-opus-5-5": [4, 0.2, 20],
-  "claude-opus-5": [5, 0.5, 25],
-  "claude-sonnet-5-5": [2, 0.1, 10],
-  "claude-sonnet-5": [2, 0.2, 10],
-  "claude-haiku-5-5": [0.1, 0.01, 0.5], // prompts up to 100K tokens; longer prompts cost 5x
-  "claude-haiku-4-5": [1, 0.1, 5],
-};
-
-/** The rate for a model, matching dated or prefixed names (claude-haiku-4-5-20251001, anthropic/claude-sonnet-5-5). */
-export function rateFor(model: string): readonly [number, number, number] | null {
-  const m = model.trim().toLowerCase().replace(/^.*\//, "");
-  let best: string | null = null;
-  for (const name of Object.keys(API_RATES)) {
-    if ((m === name || m.startsWith(`${name}-`) || m.startsWith(`${name}@`)) && (!best || name.length > best.length)) best = name;
-  }
-  return best ? API_RATES[best]! : null;
-}
 
 export interface CostLine {
   label: string;
@@ -67,10 +39,9 @@ export interface CostReport {
   unpricedModels: string[];
 }
 
+/** The row at API prices, from the server's rate card (fork patch 17); null when its model has no rate. */
 function apiUsd(row: PluginIssueCostBreakdownRow): number | null {
-  const rate = rateFor(row.model);
-  if (!rate) return null;
-  return (row.inputTokens * rate[0] + row.cachedInputTokens * rate[1] + row.outputTokens * rate[2]) / 1_000_000;
+  return row.apiEstimateCents == null ? null : row.apiEstimateCents / 100;
 }
 
 function emptyLine(label: string): CostLine {
@@ -135,7 +106,7 @@ export function costReportText(type: string, report: CostReport, taskCount: numb
     "By model:",
     ...report.byModel.map((l) => `- ${lineText(l)}`),
     "",
-    "The API price is an estimate from the ADO plugin's rate card (standard API prices; cache writes priced as plain input, so it can be a little low). It is not an invoice.",
+    "The API price is an estimate from Paperclip's rate card (standard API prices; cache writes priced as plain input, so it can be a little low). It is not an invoice.",
   ];
   if (report.unpricedModels.length) lines.push(`Not in the estimate (no API price known): ${report.unpricedModels.join(", ")}.`);
   return lines.join("\n");

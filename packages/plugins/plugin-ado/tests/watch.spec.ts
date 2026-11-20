@@ -72,15 +72,18 @@ function setup() {
     logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
   };
   const onCompleted = vi.fn(async (..._a: unknown[]) => {});
+  const onStateChanged = vi.fn(async (..._a: unknown[]) => {});
   const watcher = createWorkItemWatcher({
     ctx: ctx as any,
     findTaskForWorkItem: async (_c, id) => tasks[id] ?? null,
     serviceAccountName: async () => SVC,
     onCompleted,
+    onStateChanged,
   });
   return {
     watcher,
     onCompleted,
+    onStateChanged,
     ado,
     issues,
     state,
@@ -205,6 +208,13 @@ describe("telling agents apart when ADO reports another account name (Rowan's lo
     expect((await s.change(summary(811, "In Review", 2))).notified).toEqual([]);
     expect(s.issues.createComment).not.toHaveBeenCalled();
   });
+
+  it("does not wake anyone for the plugin's own notes (auto-assignment, cost reports)", async () => {
+    const s = setup();
+    s.setUpdates([upd(2, "Josh Fields AI Team", {})]);
+    s.setComments([comment(8, "Josh Fields AI Team", "[ADO plugin] Assigned to Maple: builder role test.")]);
+    expect((await s.change(summary(811, "In Review", 2))).notified).toEqual([]);
+  });
 });
 
 describe("the work item drives its task", () => {
@@ -267,6 +277,8 @@ describe("the work item drives its task", () => {
     s.setUpdates([upd(7, "Josh", stateChange("New", "Removed"))]);
     await s.change(summary(811, "Removed", 7));
     expect(s.issues.update).toHaveBeenLastCalledWith("task-maple", { status: "cancelled" }, CO);
+    // A6: every state change goes to the router hook, before anyone is told.
+    expect(s.onStateChanged).toHaveBeenCalledTimes(2);
     // D9: told once, for the Completed close only (the cost reporter picks Features and Epics).
     expect(s.onCompleted).toHaveBeenCalledTimes(1);
     expect(s.onCompleted).toHaveBeenCalledWith(CO, expect.objectContaining({ id: 811, state: "Completed" }), expect.objectContaining({ id: "task-maple" }));

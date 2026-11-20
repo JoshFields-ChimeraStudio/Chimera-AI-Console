@@ -2,6 +2,7 @@ import { addCents, normalizeCents, usdToUnits, unitsToCents } from "@paperclipai
 import { and, eq, gte, inArray, lt, or, sql, type SQL } from "drizzle-orm";
 import { budgetPolicies, budgetReservations, browserUseRuns, browserUseSessions, costEvents, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { withBudgetSpan } from "./budget-tracing.js";
+import { apiEstimateSpendCentsSql } from "./api-estimate.js";
 
 export interface BudgetExposure {
   ledgerCents: string;
@@ -74,7 +75,8 @@ const liveCost = sql`case when ${heartbeatRuns.costAccountedAt} is null and ${he
  * agents or receipt history; each policy retains its own scope and window. */
 async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): Promise<ObservedSpend[]> {
   const windows = policies.map(policy => budgetWindow(policy.windowKind, now));
-  const billable = policies.map((policy, index) => ({ policy, index })).filter(({ policy }) => policy.metric === "billed_cents");
+  // api_estimate_cents (Chimera fork, D9) observes the same scope and window, counting subscription usage at API prices.
+  const billable = policies.map((policy, index) => ({ policy, index })).filter(({ policy }) => policy.metric === "billed_cents" || policy.metric === "api_estimate_cents");
   const ledgerColumns: Record<string, SQL> = {}, heldColumns: Record<string, SQL> = {}, runColumns: Record<string, SQL> = {}, browserColumns: Record<string, SQL> = {};
   const ledgerPredicates: SQL[] = [], heldPredicates: SQL[] = [], runPredicates: SQL[] = [], browserPredicates: SQL[] = [];
   for (const { policy, index } of billable) {
@@ -126,7 +128,8 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
       where ${budgetReservations.companyId} = ${heartbeatRuns.companyId}
         and ${budgetReservations.runId} = ${heartbeatRuns.id} and ${budgetReservations.state} = 'held')`;
     ledgerPredicates.push(ledger); heldPredicates.push(held); runPredicates.push(run);
-    ledgerColumns[`total${index}`] = sql`coalesce(sum(${costEvents.costCents}) filter (where ${ledger}), 0)::text`;
+    const spend = policy.metric === "api_estimate_cents" ? apiEstimateSpendCentsSql() : sql`${costEvents.costCents}`;
+    ledgerColumns[`total${index}`] = sql`coalesce(sum(${spend}) filter (where ${ledger}), 0)::text`;
     // "Usage with no reliable price" means observed usage that could not be
     // priced. These unpriced charges are not that, so they never trip the
     // blocking policy (they stay visible in Costs):

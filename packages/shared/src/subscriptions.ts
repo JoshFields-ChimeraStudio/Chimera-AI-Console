@@ -74,6 +74,11 @@ export interface SubscriptionUsage {
   eventCount: number;
   estimatedEventCount: number;
   unpricedEventCount: number;
+  /** Chimera fork (D9): what this usage would cost at API list prices (api-rate-card.ts):
+   * the estimate for subscription-included usage, billed cost for the rest. */
+  apiEstimateCents?: string;
+  /** Subscription-included events whose model has no API rate, so the estimate leaves them out. */
+  unratedEventCount?: number;
 }
 
 export interface SubscriptionAccountReport {

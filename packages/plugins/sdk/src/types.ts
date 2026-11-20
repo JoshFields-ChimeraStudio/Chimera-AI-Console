@@ -1363,6 +1363,11 @@ export interface PluginIssueCostBreakdownRow {
   /** Cache reads. */
   cachedInputTokens: number;
   outputTokens: number;
+  /**
+   * This row at API list prices (fork patch 17): billed cost, with subscription-included usage priced
+   * from the server's rate card. Null when that usage is on a model the rate card has no price for.
+   */
+  apiEstimateCents?: number | null;
 }
 
 export interface PluginIssueCostSummary {
@@ -1370,6 +1375,8 @@ export interface PluginIssueCostSummary {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** The totals at API list prices (fork patch 17). */
+  apiEstimateCents?: number;
   billingCode: string | null;
   /**
    * The same totals split by agent, model and billing type (fork patch 16: the ADO
@@ -1554,6 +1561,12 @@ export interface PluginIssuesClient {
       blockedByIssueIds?: string[];
       labelIds?: string[];
       executionWorkspaceSettings?: Record<string, unknown> | null;
+      /**
+       * Fork patch 17: the model the assignee runs on for this task (the ADO plugin's model
+       * escalation, BACKLOG D9). The host accepts only { adapterConfig: { model } } and keeps
+       * the task's other overrides.
+       */
+      assigneeAdapterOverrides?: IssueAssigneeAdapterOverrides | null;
     },
     companyId: string,
     actor?: PluginIssueMutationActor,

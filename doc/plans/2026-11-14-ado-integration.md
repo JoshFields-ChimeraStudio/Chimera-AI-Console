@@ -74,7 +74,28 @@ A global toolbar button from the plugin ("ADO · N need you", `AdoNeedsJosh` in 
 | Document | In Review | review the document's pull request |
 | any type | Blocked | answer the question |
 
-The button refreshes every 30 seconds. With Josh's permission (a button in the list), the browser shows a Windows notification for each new wait while any Paperclip tab is open; clicking it opens the item's Backlog page. What has been seen is kept per browser (localStorage), so the first load and reloads do not notify again. Notifications with every tab closed would need a service worker and web push, which is not built. Waits from Paperclip itself (approvals, failed runs, budget stops) are the rest of D4.
+The button refreshes every 30 seconds. With Josh's permission (a button in the list), the browser shows a Windows notification for each new wait while any Paperclip tab is open; clicking it opens the item's Backlog page. What has been seen is kept per browser (localStorage), so the first load and reloads do not notify again. Notifications with every tab closed would need a service worker and web push, which is not built. Waits from Paperclip itself (approvals, which include a budget hard stop, failed runs, and tasks newly unread in Josh's inbox) are shown by core, not the plugin (fork patch 17, `ui/src/lib/browser-notifications.ts`): turned on per browser in Profile settings, and only while the tab is in the background, from the tab that leads the cross-tab badge polling.
+
+## A3: intake by tag
+
+A top-level work item (no parent: an Epic, or a Bug) tagged `for:<Agent>` in ADO is picked up for that agent. `processWorkItem` hands every item it processes (live events, the catch-up after a restart, full syncs; not the assignment path itself, which holds the item's lock) to `src/intake/index.ts`. For a non-final item with no parent and no linked task, it reads the item's tags; with a `for:` tag naming an assignable agent it assigns through the Backlog view's assigner (task created, agent woken, actor the plugin), re-checking inside the assignment lock that no task appeared meanwhile, and comments "Picked up for <Agent>" on the item. Any linked task, open or finished, means the item is not new work, so finished work is never reopened and nothing changes hands. A tag naming no agent gets one comment per tag value (plugin state `intake-refused:<id>`). Items with a parent are left alone: `for:` tags under a Feature belong to A6.
+
+## A6: assignment by builder routes
+
+The planner decides who suits each item and records it as tags when he creates it: `builder:<role>` on a User Story or Bug (`builderRole`), `for:<agent>` on a Review, QA Test or Task (`forAgent`). The **Builder routes** setting lists, per role, its agents (in order of preference) and how many open Stories and Bugs each may hold (default 1).
+
+- **Release.** When someone sets a Feature to Ready For Work, the watcher calls the router before it wakes the Feature's owner. The router assigns every `for:` item under the Feature, then each tagged Story whose Feature is Ready For Work or In Progress, whose `Depends on #<id>` items are all Completed or Removed, and for which a builder of its role holds fewer open Stories and Bugs than the limit: to the one holding fewest, ties to the first listed. A started Story's untagged Tasks go to its builder. Paused, unapproved or unknown agents are skipped.
+- **Slots.** When a Story or Bug reaches Completed or Removed, the router looks at every New Story and Bug with a builder tag (backlog order) and starts what now fits.
+- **What it says.** A comment on each item it assigns (role, and how many open Stories the builder held), and one on the Feature at release: what it assigned and what waits and why (a dependency, every builder full, no route, no available builder). The watcher wakes nobody for comments signed `[ADO plugin]`.
+- **Limits.** Untagged items stay with the director, who never assigns a tagged Story. Bugs entered by Josh have no builder tag (no tool sets tags on an existing item), so they stay with the director. Passes run one at a time per company, so two finished Stories cannot fill the same slot.
+
+## A8: read tools, and no ADO MCP
+
+Three read-only tools close the gaps that kept the ADO MCP server in the agents' configs: `ado_get_file` reads a file (text with line numbers, 2000 lines at a time, refused if binary) or lists a folder, in any repository of the project, at a branch (default `main`) or a commit; `ado_get_pr_changes` lists the files of a pull request's latest iteration, or diffs one file against the merge base (`src/tools/diff.ts`, files up to 3,000 lines); `ado_search_work_items` finds items whose title contains some text, optionally by type and state (WIQL, values quoted). Every role has them. The host rates them read (no write verb in the name). With them the MCP server can come out of the agents' adapter configs.
+
+## A12: the Paperclip project of a linked task
+
+A work item names its code repository with a `repo:<name>` tag. Agents set it with `repository` on `ado_update_technical_notes` (the architect, on each Story, Bug and Task) or `ado_create_work_item` (Tiamat gives Grimoire on the Documentation); the name is checked against the ADO project's repositories, and an item created under a tagged one gets the same tag. When the plugin creates the linked task (assignment from ADO, the Backlog view or a tool), it reads the item's tag, or the nearest one up the ADO tree, and puts the task in the Paperclip project that has a workspace on that repository (a repo URL ending `/_git/<name>`, the primary workspace first), or else the project named like it. Without a tag, or with no such project, the task goes where it did before, in its parent task's project; with a tag but no project, the task gets a comment saying so. The project brings the agent that repository's worktree and `CLAUDE.md`. Tasks that already exist are not moved. Code: `src/projects/index.ts`, used by `backlog/assign.ts`.
 
 ## A10: the smoke-test Epic
 
@@ -83,6 +104,10 @@ A dashboard widget, "Azure DevOps smoke test" (`AdoSmokeTest`, worker code in `s
 - If a smoke test already exists, Start first does Clean up, and creates nothing if any item could not be closed.
 - **Clean up** walks the Epic's tree (at most 200 items) and sets every item that is not Completed or Removed to Removed (Completed for a type with no Removed state), parents before children, signed `[ADO plugin]`. A closed parent cannot roll up and its closed task wakes no one, so children closed after it change nothing. Open pull requests are left alone.
 - Only a board user can run either action. The widget also lists Josh's own steps (request changes on the Document once, approve the plan and the breakdown, merge).
+
+## D9: model escalation
+
+Each agent keeps its configured model. `src/escalation/index.ts` runs from the watcher's state-change hook, after the A6 router and before the builder is woken by the same change. When a Review under a User Story or Bug is set Changes Requested for the last time before the round limit (round 2 of 2; the next request is Blocked for Josh), or a QA Test under it is set Failed and its QA Tests have now failed twice in all, the plugin sets the **Escalation model** setting (default `claude-opus-5-5`; empty turns it off) as the model override of the builder's linked task (`assigneeAdapterOverrides.adapterConfig.model`, fork patch 17) and comments on the task. Paperclip applies that override to every later run on that task only, so the fix and the rest of that Story run on the stronger model; the builder's other tasks keep its model. A task already on the escalation model is left alone. The cost report per Feature shows the result by model.
 
 ## Constraints found that affect later items
 

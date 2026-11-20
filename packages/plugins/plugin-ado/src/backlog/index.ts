@@ -9,6 +9,7 @@
  *   shared with the agents' ado_update_assignment tool).
  * Nothing here writes to ADO.
  */
+import { createProjectRouter } from "../projects/index.js";
 import type { Issue } from "@paperclipai/plugin-sdk";
 import { summarize, type AdoClient, type AdoWorkItem, type WorkItemSummary } from "../ado/client.js";
 import type { PluginDeps, WorkItemChangedHandler } from "../deps.js";
@@ -282,7 +283,7 @@ export function registerBacklogFeatures(deps: PluginDeps, links: LinkFeatures, o
     return deleted;
   }
 
-  const assigner = createAssigner({ deps, links, repo, projectKey, processWorkItem: options.processWorkItem });
+  const assigner = createAssigner({ deps, links, repo, projectKey, processWorkItem: options.processWorkItem, projects: createProjectRouter(deps) });
   const readWorkItem = assigner.readWorkItem;
 
   async function backlog(companyId: string): Promise<BacklogData> {

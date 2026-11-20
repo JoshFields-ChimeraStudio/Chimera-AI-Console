@@ -64,6 +64,9 @@ class FakeAdo {
   /** Called before answering a WIQL query; lets a test act "during" a sync. */
   onWiql?: () => Promise<void> | void;
 
+  /** Comments the plugin posted, by work item. */
+  posted: Array<{ id: number; text: string }> = [];
+
   add(item: Partial<FakeItem> & { id: number }) {
     this.items.set(item.id, {
       rev: 1,
@@ -124,6 +127,10 @@ class FakeAdo {
       return Response.json({ value: ids.map((id: number) => (this.items.has(id) ? this.json(this.items.get(id)!) : null)) });
     }
     const comments = url.match(/\/workItems\/(\d+)\/comments/);
+    if (comments && init?.method === "POST") {
+      this.posted.push({ id: Number(comments[1]), text: JSON.parse(String(init.body)).text });
+      return Response.json({ id: this.posted.length, text: "", createdBy: { displayName: "svc" }, createdDate: "2026-11-20T00:00:00Z" });
+    }
     if (comments) return Response.json({ comments: this.comments.get(Number(comments[1])) ?? [], totalCount: 0 });
     const pr = url.match(/\/git\/repositories\/([^/]+)\/pullrequests\/(\d+)/);
     if (pr) {
@@ -783,6 +790,30 @@ describe("assign-agent", () => {
     expect((await backlog(s)).items.find((i) => i.id === 70)!.linkedTask).toMatchObject({ issueId: res.issueId, assigneeAgentId: AGENT.id });
   });
 
+  it("puts a new task in the project of its repository (A12), else its parent's, and says when no project has the repository", async () => {
+    const s = setup();
+    s.harness.seed({
+      projects: [
+        { id: "proj-simple", companyId: CO, name: "SimpleRepo service", archivedAt: null, workspaces: [{ repoUrl: "https://dev.azure.com/ChimeraStudioSoftware/AI%20Testing/_git/SimpleRepo" }], primaryWorkspace: null },
+      ] as never,
+    });
+    await start(s);
+    s.ado.add({ id: 80, type: "User Story", fields: { "System.Tags": "agent:Oak; repo:SimpleRepo" } });
+    s.ado.add({ id: 81, type: "Review", parent: 80 });
+    s.ado.add({ id: 82, type: "User Story", fields: { "System.Tags": "repo:Unknown" } });
+
+    // The Review has no tag of its own: it takes the Story's repository (read up the ADO tree).
+    const review = await assign(s, 81, AGENT.id);
+    expect((await s.harness.ctx.issues.get(review.issueId, CO))!.projectId).toBe("proj-simple");
+    const story = await assign(s, 80, AGENT.id);
+    expect((await s.harness.ctx.issues.get(story.issueId, CO))!.projectId).toBe("proj-simple");
+
+    const createComment = vi.spyOn(s.harness.ctx.issues, "createComment");
+    const lost = await assign(s, 82, AGENT.id);
+    expect((await s.harness.ctx.issues.get(lost.issueId, CO))!.projectId ?? null).toBeNull();
+    expect(createComment).toHaveBeenCalledWith(lost.issueId, expect.stringContaining("works in the repository **Unknown**, but no Paperclip project has a workspace on it"), CO);
+  });
+
   it("reassigns an existing linked task, reopens a parked or closed one, and unassigns", async () => {
     const s = setup();
     const task = issue({ identifier: "CHI-5", status: "backlog", assigneeAgentId: OTHER_AGENT.id, originKind: ADO_LINK_ORIGIN_KIND as never, originId: "ChimeraStudioSoftware/AI Testing/71" });
@@ -871,5 +902,54 @@ describe("assign-agent", () => {
       ).rejects.toThrow("Only a board user can assign ADO work items to agents");
     }
     expect(await s.harness.ctx.issues.list({ companyId: CO })).toHaveLength(0);
+  });
+});
+
+describe("intake (A3)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("picks up a top-level item tagged for:<agent> once, as that agent's task, and says so on the item", async () => {
+    const s = setup();
+    await start(s);
+    s.ado.add({ id: 90, type: "Epic", fields: { "System.Tags": "for:Tiamat" } });
+    await deliver(s, 90);
+    const task = (await s.harness.ctx.issues.list({ companyId: CO })).find((i) => i.originId?.endsWith("/90"));
+    expect(task).toMatchObject({ assigneeAgentId: OTHER_AGENT.id, status: "todo" });
+    expect(s.wakeups).toEqual([task!.id]);
+    expect(s.ado.posted).toEqual([{ id: 90, text: expect.stringContaining("[ADO plugin] Picked up for Tiamat (tag for:Tiamat)") }]);
+
+    // Delivered again, or in a full sync: nothing new.
+    await deliver(s, 90);
+    await syncBacklog(s);
+    await vi.waitFor(() => expect(fullSyncRecord(s)).toBeTruthy());
+    expect((await s.harness.ctx.issues.list({ companyId: CO })).filter((i) => i.originId?.endsWith("/90"))).toHaveLength(1);
+    expect(s.ado.posted).toHaveLength(1);
+  });
+
+  it("never reopens finished work, and leaves items with a parent, final items and untagged items alone", async () => {
+    const s = setup();
+    const done = issue({ status: "done", assigneeAgentId: AGENT.id, originKind: ADO_LINK_ORIGIN_KIND as never, originId: "ChimeraStudioSoftware/AI Testing/91" });
+    s.harness.seed({ issues: [done] });
+    await start(s);
+    s.ado.add({ id: 91, type: "Epic", fields: { "System.Tags": "for:Tiamat" } });
+    s.ado.add({ id: 92, type: "Epic", state: "Completed", fields: { "System.Tags": "for:Tiamat" } });
+    s.ado.add({ id: 93, type: "Review", parent: 91, fields: { "System.Tags": "for:Tiamat" } });
+    s.ado.add({ id: 94, type: "Bug" });
+    for (const id of [91, 92, 93, 94]) await deliver(s, id);
+    expect((await s.harness.ctx.issues.get(done.id, CO))!.status).toBe("done");
+    expect((await s.harness.ctx.issues.list({ companyId: CO })).filter((i) => i.assigneeAgentId === OTHER_AGENT.id)).toHaveLength(0);
+    expect(s.ado.posted).toEqual([]);
+  });
+
+  it("a tag naming no agent is reported once, and again only if the tag changes", async () => {
+    const s = setup();
+    await start(s);
+    s.ado.add({ id: 95, type: "Bug", fields: { "System.Tags": "for:Nobody" } });
+    await deliver(s, 95);
+    await deliver(s, 95);
+    expect(s.ado.posted).toEqual([{ id: 95, text: expect.stringContaining("Not picked up: the tag for:Nobody names no agent that can take it (no agent is called Nobody)") }]);
+    s.ado.items.get(95)!.fields = { "System.Tags": "for:Ryujin" };
+    await deliver(s, 95);
+    expect(s.ado.posted.at(-1)!.text).toContain("Picked up for Ryujin");
   });
 });

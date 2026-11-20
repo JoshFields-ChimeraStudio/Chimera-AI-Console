@@ -722,7 +722,10 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         ),
       );
 
-    const policies = candidatePolicies.filter(policy => policy.isActive && policy.metric === "billed_cents" && policy.amount > 0);
+    // Chimera fork (D9): api_estimate_cents policies raise soft/hard incidents too;
+    // reservations and provider dispatch stay billed-only.
+    const policies = candidatePolicies.filter(policy => policy.isActive
+      && (policy.metric === "billed_cents" || policy.metric === "api_estimate_cents") && policy.amount > 0);
     const observations = prepared ? policies.map(policy => prepared.observations[prepared.policies.findIndex(row => row.id === policy.id)])
       : await computeObservedSpends(db, policies, now);
     for (const [index, policy] of policies.entries()) {
@@ -909,7 +912,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         agentId: input.scopeType === "agent" ? input.scopeId : null,
         projectId: input.scopeType === "project" ? input.scopeId : null });
 
-      if (input.scopeType === "company" && windowKind === "calendar_month_utc") {
+      if (input.scopeType === "company" && windowKind === "calendar_month_utc" && metric === "billed_cents") {
         await db
           .update(companies)
           .set({
@@ -919,7 +922,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
           .where(eq(companies.id, input.scopeId));
       }
 
-      if (input.scopeType === "agent" && windowKind === "calendar_month_utc") {
+      if (input.scopeType === "agent" && windowKind === "calendar_month_utc" && metric === "billed_cents") {
         await db
           .update(agents)
           .set({

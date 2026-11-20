@@ -28,6 +28,7 @@ import { AppDetailSidebar } from "./AppConnectionSidebar.production";
 import { BreadcrumbBar } from "./BreadcrumbBar.production";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { CommandPalette } from "./CommandPalette";
+import { BrowserNotifications } from "./BrowserNotifications";
 import { KeyboardShortcutsCheatsheet } from "./KeyboardShortcutsCheatsheet";
 import { ToastViewport } from "./ToastViewport";
 import { MobileBottomNav } from "./MobileBottomNav";
@@ -741,6 +742,7 @@ export function Layout() {
         </div>
         {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
         <CommandPalette />
+        <BrowserNotifications />
         <BoardDialogs />
         <KeyboardShortcutsCheatsheet
           open={shortcutsOpen}

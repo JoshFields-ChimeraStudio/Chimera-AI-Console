@@ -12,6 +12,7 @@ import { queueBudgetEvaluation } from "./budget-evaluation-work.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 
 import { resolveCostDateRange, type CostDateRange } from "./cost-date-range.js";
+import { apiEstimateSpendCentsSql } from "./api-estimate.js";
 export type { CostDateRange } from "./cost-date-range.js";
 
 const METERED_BILLING_TYPE = "metered_api";
@@ -430,6 +431,8 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
           estimatedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'estimated')::int`,
           costCents: sumAsNumber(costEvents.costCents),
           costCentsExact: sql<string>`coalesce(sum(${costEvents.costCents}), 0)::text`,
+          // Chimera fork (D9): the same usage at API list prices (api-rate-card.ts).
+          apiEstimateCents: sumAsNumber(apiEstimateSpendCentsSql()),
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),
@@ -605,6 +608,8 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
           estimatedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'estimated')::int`,
           costCents: sumAsNumber(costEvents.costCents),
           costCentsExact: sql<string>`coalesce(sum(${costEvents.costCents}), 0)::text`,
+          // Chimera fork (D9): the same usage at API list prices (api-rate-card.ts).
+          apiEstimateCents: sumAsNumber(apiEstimateSpendCentsSql()),
           inputTokens: sumAsNumber(ordinaryInputTokens),
           cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
           outputTokens: sumAsNumber(costEvents.outputTokens),

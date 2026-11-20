@@ -14,6 +14,9 @@ import { notifyBacklogChanged } from "./backlog/notify.js";
 import { createPullRequestNotifier, type PullRequestNotifier } from "./pullrequests/index.js";
 import { createWorkItemWatcher, type WorkItemWatcher } from "./watch/index.js";
 import { registerSmokeTest } from "./smoke/index.js";
+import { createEscalation, DEFAULT_ESCALATION_MODEL } from "./escalation/index.js";
+import { createRouter, parseRoutes } from "./routing/index.js";
+import { createIntake, type Intake } from "./intake/index.js";
 import { createCostReporter, type CostReporterOptions } from "./costs/index.js";
 import type { WorkItemCacheRepository } from "./backlog/repository.js";
 
@@ -67,6 +70,8 @@ export interface AdoPluginConfig {
   queueName?: string;
   serviceAccountName?: string;
   smokeTestAgent?: string;
+  builderRoutes?: unknown;
+  escalationModel?: string;
 }
 
 export interface LastEventRecord {
@@ -152,6 +157,7 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
   let backlog: BacklogFeatures | null = null;
   let pullRequests: PullRequestNotifier | null = null;
   let watcher: WorkItemWatcher | null = null;
+  let intake: Intake | null = null;
 
   function runtime(companyId: string): CompanyRuntime {
     let rt = runtimes.get(companyId);
@@ -200,6 +206,10 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
     const before = links ? await links.findLinkByWorkItem(companyId, item.id) : null;
     await backlog?.onWorkItemChanged(companyId, item, source);
     await links?.onWorkItemChanged(companyId, item, source);
+    // A3: a top-level item tagged for:<Agent> with no linked task yet becomes that agent's task.
+    // Not from inside an assignment (it holds the item's lock, and is an assignment already).
+    const pickedUp = source === "assign-agent" ? undefined : await intake?.onWorkItem(companyId, item);
+    if (pickedUp?.kind === "assigned") c.logger.info("ADO work item picked up", { companyId, workItemId: item.id, agent: pickedUp.agent, source });
     // Linked items always; an item with no linked task only on a live event, for its parent's owner (a sync would replay old changes).
     if (watcher && (before || !source.startsWith("sync:"))) {
       const config = await c.config.get(companyId);
@@ -561,6 +571,26 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
       // Pull request completed, abandoned or commented on: tell and wake the agent on the linked task.
       pullRequests = createPullRequestNotifier({ ctx: c, findTaskForWorkItem: links.findTaskForWorkItem });
       // ADO drives the linked task: it stays open until the work item is final, and others' changes wake its agent.
+      intake = createIntake({ deps, links, assigner: backlog.assigner });
+      // A6: approved work assigned by the builderRoutes setting, with a limit per builder.
+      const router = createRouter({
+        deps,
+        links,
+        assigner: backlog.assigner,
+        async routes(companyId) {
+          return parseRoutes(((await c.config.get(companyId)) as Partial<AdoPluginConfig>).builderRoutes);
+        },
+      });
+      // D9: a struggling builder's Story moves to a stronger model.
+      const escalation = createEscalation({
+        deps,
+        links,
+        async escalationModel(companyId) {
+          const config = (await c.config.get(companyId)) as Partial<AdoPluginConfig>;
+          const model = typeof config.escalationModel === "string" ? config.escalationModel.trim() : DEFAULT_ESCALATION_MODEL;
+          return model || null;
+        },
+      });
       // D9: a Feature's or Epic's cost, written to ADO once its runs have finished.
       const costReporter = createCostReporter({ deps, ...options.costReporter });
       watcher = createWorkItemWatcher({
@@ -570,6 +600,12 @@ export function createAdoPlugin(options: AdoPluginOptions = {}) {
           return (await deps.settings(companyId))?.serviceAccountName ?? null;
         },
         onCompleted: costReporter.onCompleted,
+        async onStateChanged(companyId, item) {
+          await router.onStateChanged(companyId, item);
+          await escalation.onStateChanged(companyId, item).catch((err) =>
+            c.logger.warn("ADO model escalation failed", { companyId, workItemId: item.id, error: err instanceof Error ? err.message : String(err) }),
+          );
+        },
       });
       void costReporter.resume().catch((err) => c.logger.warn("ADO cost reports could not be resumed", { error: err instanceof Error ? err.message : String(err) }));
 

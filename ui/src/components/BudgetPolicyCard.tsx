@@ -19,8 +19,22 @@ function parseDollarInput(value: string) {
   return Math.round(parsed * 100);
 }
 
-function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
-  return windowKind === "lifetime" ? "Lifetime budget" : "Monthly UTC budget";
+function windowLabel(summary: Pick<BudgetPolicySummary, "windowKind" | "metric">) {
+  const window = summary.windowKind === "lifetime" ? "Lifetime budget" : "Monthly UTC budget";
+  // Chimera fork (D9): a budget on the API-price estimate warns and stops on subscription usage too.
+  return summary.metric === "api_estimate_cents" ? `${window} at API prices (subscription usage estimated)` : window;
+}
+
+/** Chimera fork (D9): an unsaved API-estimate budget for a scope, so one can be set beside the billed budget. */
+export function apiEstimateBudgetPlaceholder(
+  base: Pick<BudgetPolicySummary, "companyId" | "scopeType" | "scopeId" | "scopeName" | "windowKind">,
+): BudgetPolicySummary {
+  return {
+    ...base, policyId: "", metric: "api_estimate_cents", amount: 0, observedAmount: 0, unpricedEventCount: 0,
+    pendingRunCount: 0, remainingAmount: 0, utilizationPercent: 0, warnPercent: 80, hardStopEnabled: true,
+    unpricedUsagePolicy: "block", notifyEnabled: true, isActive: false, status: "ok", paused: false, pauseReason: null,
+    windowStart: new Date(), windowEnd: new Date(),
+  };
 }
 
 function statusTone(status: BudgetPolicySummary["status"]) {
@@ -206,7 +220,7 @@ export function BudgetPolicyCard({
               {summary.scopeType}
             </div>
             <div className="mt-2 text-xl font-semibold">{summary.scopeName}</div>
-            <div className="mt-2 text-sm text-muted-foreground">{windowLabel(summary.windowKind)}</div>
+            <div className="mt-2 text-sm text-muted-foreground">{windowLabel(summary)}</div>
           </div>
           <div
             className={cn(
@@ -244,7 +258,7 @@ export function BudgetPolicyCard({
               {summary.scopeType}
             </div>
             <CardTitle className="mt-1 text-base">{summary.scopeName}</CardTitle>
-            <CardDescription className="mt-1">{windowLabel(summary.windowKind)}</CardDescription>
+            <CardDescription className="mt-1">{windowLabel(summary)}</CardDescription>
           </div>
           <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status))}>
             <StatusIcon className="h-3.5 w-3.5" />

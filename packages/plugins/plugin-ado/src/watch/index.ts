@@ -45,6 +45,8 @@ export interface WatchDeps {
   serviceAccountName(companyId: string): Promise<string | null>;
   /** Called once when a work item reaches Completed and its open task is closed (D9: the cost report). */
   onCompleted?(companyId: string, item: WorkItemSummary, task: Issue): Promise<void>;
+  /** Called when someone changed the item's state, before anyone is told (A6: auto-assignment). */
+  onStateChanged?(companyId: string, item: WorkItemSummary): Promise<void>;
 }
 
 /** What was last handled for one work item. */
@@ -309,6 +311,12 @@ export function createWorkItemWatcher(deps: WatchDeps) {
 
     const notified: string[] = [];
     const closed = task ? await closeIfFinal(companyId, item, task) : false;
+    // A6: work released or a builder freed is assigned before its owner is woken, so the owner sees it done.
+    if (deps.onStateChanged && changes.some((c) => c.to !== undefined)) {
+      await deps.onStateChanged(companyId, item).catch((err) =>
+        ctx.logger.warn("ADO state-change hook failed", { companyId, workItemId: item.id, error: err instanceof Error ? err.message : String(err) }),
+      );
+    }
     const assignee = task?.assigneeAgentId ? await agentName(companyId, task.assigneeAgentId) : null;
     const isAssignee = (a: Actor) => a.agent && !!assignee && lower(a.name) === lower(assignee);
 
@@ -326,7 +334,8 @@ export function createWorkItemWatcher(deps: WatchDeps) {
               : { name: c.createdBy || "Someone", agent: false };
           return { c, actor };
         })
-        .filter((x) => !isAssignee(x.actor));
+        // The plugin's own notes (auto-assignment, cost reports) are not news to wake anyone for.
+        .filter((x) => !isAssignee(x.actor) && lower(x.actor.name) !== lower(PLUGIN_SIGNATURE));
       if (theirs.length || theirComments.length) {
         const lines = [`[ADO #${item.id} ${item.title}](${item.webUrl}) changed:`, ""];
         for (const c of theirs) lines.push(`- **${actorLabel(c.actor)}** ${c.text}`);

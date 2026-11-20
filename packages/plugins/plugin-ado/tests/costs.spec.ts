@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { PluginIssueCostBreakdownRow } from "@paperclipai/plugin-sdk";
-import { buildCostReport, costReportText, createCostReporter, rateFor } from "../src/costs/index.js";
+import { buildCostReport, costReportText, createCostReporter } from "../src/costs/index.js";
 
 const row = (over: Partial<PluginIssueCostBreakdownRow>): PluginIssueCostBreakdownRow => ({
   agentId: "a-maple",
@@ -16,40 +16,30 @@ const row = (over: Partial<PluginIssueCostBreakdownRow>): PluginIssueCostBreakdo
 });
 
 describe("cost per Feature (D9)", () => {
-  it("finds the rate for dated and prefixed model names, and none for an unknown model", () => {
-    expect(rateFor("claude-sonnet-5-5")).toEqual([2, 0.1, 10]);
-    expect(rateFor("claude-haiku-4-5-20251001")).toEqual([1, 0.1, 5]);
-    expect(rateFor("anthropic/claude-opus-5-5")).toEqual([4, 0.2, 20]);
-    // The longest name wins: claude-sonnet-5-5 is not priced as claude-sonnet-5.
-    expect(rateFor("claude-sonnet-5")).toEqual([2, 0.2, 10]);
-    expect(rateFor("gpt-9")).toBeNull();
-  });
-
-  it("prices tokens at API rates per model and splits them by agent and model", () => {
+  it("adds up the server's API estimate and splits it by agent and model", () => {
     const names = new Map([["a-maple", "Maple"], ["a-rowan", "Rowan"]]);
     const report = buildCostReport(
       [
-        // 1M input * $2 + 10M cache reads * $0.10 + 0.1M output * $10 = $2 + $1 + $1 = $4
-        row({ agentId: "a-maple", events: 3, inputTokens: 1_000_000, cachedInputTokens: 10_000_000, outputTokens: 100_000 }),
-        // 2M input * $1 + 0 + 0.2M output * $5 = $3
-        row({ agentId: "a-rowan", model: "claude-haiku-4-5-20251001", events: 2, inputTokens: 2_000_000, outputTokens: 200_000 }),
-        // Billed on the API: counted as billed, and still estimated.
-        row({ agentId: "a-rowan", billingType: "api", costCents: 150, events: 1, inputTokens: 500_000 }),
-        // No rate: left out of the estimate, and named.
-        row({ agentId: null, model: "mystery-1", events: 1, inputTokens: 999 }),
+        // The server prices each row (fork patch 17); the plugin only adds the estimates up.
+        row({ agentId: "a-maple", events: 3, inputTokens: 1_000_000, cachedInputTokens: 10_000_000, outputTokens: 100_000, apiEstimateCents: 400 }),
+        row({ agentId: "a-rowan", model: "claude-haiku-4-5-20251001", events: 2, inputTokens: 2_000_000, outputTokens: 200_000, apiEstimateCents: 300 }),
+        // Billed on the API: the estimate is the billed cost.
+        row({ agentId: "a-rowan", billingType: "metered_api", costCents: 150, events: 1, inputTokens: 500_000, apiEstimateCents: 150 }),
+        // No rate (null from the server): left out of the estimate, and named.
+        row({ agentId: null, model: "mystery-1", events: 1, inputTokens: 999, apiEstimateCents: null }),
       ],
       names,
     );
     expect(report.total.events).toBe(7);
-    expect(report.total.apiUsd).toBeCloseTo(4 + 3 + 1);
+    expect(report.total.apiUsd).toBeCloseTo(4 + 3 + 1.5);
     expect(report.total.billedUsd).toBeCloseTo(1.5);
-    expect(report.byAgent.map((l) => [l.label, Number(l.apiUsd?.toFixed(2))])).toEqual([["Rowan", 4], ["Maple", 4], ["No agent", NaN]]);
+    expect(report.byAgent.map((l) => [l.label, Number(l.apiUsd?.toFixed(2))])).toEqual([["Rowan", 4.5], ["Maple", 4], ["No agent", NaN]]);
     expect(report.byModel.find((l) => l.label === "mystery-1")?.apiUsd).toBeNull();
     expect(report.unpricedModels).toEqual(["mystery-1"]);
 
     const text = costReportText("Feature", report, 6);
     expect(text).toContain("Cost of this Feature, from Paperclip's records for its task and the 5 tasks under it:");
-    expect(text).toContain("- Billed: $1.50. At API prices it would have cost about $8.00.");
+    expect(text).toContain("- Billed: $1.50. At API prices it would have cost about $8.50.");
     expect(text).toContain("Maple: $4.00 at API prices (billed $0.00); 1.0M input, 10.0M cache reads, 100k output; 3 runs");
     expect(text).toContain("Not in the estimate (no API price known): mystery-1.");
   });
@@ -65,7 +55,7 @@ describe("cost per Feature (D9)", () => {
       const summary = {
         runs,
         subtreeIssueIds: ["t-feature", "t-story", "t-review"],
-        costs: { costCents: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billingCode: null, breakdown: [row({ inputTokens: 1_000_000 })] },
+        costs: { costCents: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, billingCode: null, breakdown: [row({ inputTokens: 1_000_000, apiEstimateCents: 200 })] },
       };
       const ctx = {
         state: {
